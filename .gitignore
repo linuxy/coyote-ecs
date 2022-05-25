@@ -1,0 +1,10 @@
+vendor/iwnet/build/
+zig-out/
+zig-cache/
+.history/
+.vscode/
+target/
+Cargo.lock
+*.o
+*.so
+*.a

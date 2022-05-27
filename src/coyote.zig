@@ -9,14 +9,20 @@ pub fn main() void {
     var ctx = &World.add();
     var entities = &ctx.entities;
 
+    //Create an entity and add a component
     _ = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
     _ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
+
+    //Create an entity
     _ = Entities.add(ctx, .{});
+
     var i: usize = 0;
     while(i < 50000) : (i += 1)
         _ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
 
     var anApple = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
+
+    //Get an entity by reference
     const thatApple = Cast(Components.Apple).get(ctx, anApple);
     std.log.info("that Apple: {}", .{thatApple});
 

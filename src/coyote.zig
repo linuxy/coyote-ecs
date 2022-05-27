@@ -3,27 +3,28 @@ const std = @import("std");
 var allocator = std.heap.c_allocator;
 
 const CHUNK = 10000; //Allocate at a time. You want this at the same O() as # of entities
+const COMPONENT_CONTAINER = "Components";
 
 pub fn main() void {
     var ctx = &World.add();
     var entities = &ctx.entities;
 
-    Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
-    Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
+    _ = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
+    _ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
     var i: usize = 0;
     while(i < 50000) : (i += 1)
-        Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
+        _ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
 
     //while(true) {
-    var apple = Entities.query(entities, Components.Apple);
-    var orange = Entities.query(entities, Components.Orange);
-    defer allocator.free(apple);
-    defer allocator.free(orange);
+    var apples = Entities.query(entities, Components.Apple);
+    var oranges = Entities.query(entities, Components.Orange);
+    defer allocator.free(apples);
+    defer allocator.free(oranges);
 
-    Systems.run(Grow, .{ctx, apple});
-    Systems.run(Grow, .{ctx, orange});
+    Systems.run(Grow, .{ctx, apples});
+    Systems.run(Grow, .{ctx, oranges});
     Systems.run(Harvest, .{ctx});
-    Entities.remove(ctx, orange); //Rotten
+    Entities.remove(ctx, oranges); //Rotten
     std.log.info("Entities: {}", .{Entities.count(ctx)});
     //}
     //update FSM with yield of run?
@@ -49,7 +50,7 @@ pub fn Grow(ctx: *World, fruit: []u32) void {
     for(fruit[0..]) |entity| {
         //async schedule in fiber
         //yield
-        std.log.info("Growing: {}", .{entity});
+        //std.log.info("Growing: {}", .{entity});
         _ = entity;
         _ = ctx;
     }
@@ -88,7 +89,7 @@ const Entity = struct {
 pub fn typeToId(t: anytype) u32 {
     var idx: u32 = 0;
     inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
-        const comp_eql = comptime std.mem.eql(u8, decl.name, "Components");
+        const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
         if (decl.is_pub and comptime comp_eql) {
             inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
                 const comp_idx = comptime std.mem.indexOf(u8, @typeName(@TypeOf(t)), member.name);
@@ -106,7 +107,7 @@ pub fn typeToId(t: anytype) u32 {
 pub fn idEqualsType(id: u32, t: anytype) bool {
     var idx: u32 = 0;
     inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
-        const comp_eql = comptime std.mem.eql(u8, decl.name, "Components");
+        const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
         if (decl.is_pub and comptime comp_eql) {
             inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
                 if(idx == id and std.mem.indexOf(u8, @typeName(t), member.name) != null) {
@@ -128,7 +129,7 @@ const Entities = struct {
     free_idx: u32 = 0,
     resized: u32 = 0,
 
-    pub fn add(ctx: *World, entity: anytype) void {
+    pub fn add(ctx: *World, entity: anytype) *Entity {
         //create sparse list of entities
         if(ctx.entities.alive + 1 > ctx.entities.len)
             sparse_resize(ctx);
@@ -144,12 +145,14 @@ const Entities = struct {
         ctx.entities.dense.put(ctx.entities.free_idx, typeToId(entity)) catch unreachable;
         ctx.entities.alive += 1;
         ctx.entities.free_idx += 1;
+
+        return &ctx.entities.sparse[ctx.entities.free_idx];
     }
 
     pub fn remove(ctx: *World, entity: []u32) void {
         //mark as removed
         for(entity[0..]) |ent| {
-            std.log.info("Removed entity: {}", .{ent});
+            //std.log.info("Removed entity: {}", .{ent});
             ctx.entities.sparse[@intCast(usize, ent)].alive = false;
             ctx.entities.free_idx = ent;
             ctx.entities.alive -= 1;
@@ -164,10 +167,12 @@ const Entities = struct {
         //std.log.info("Search typeName: {s}", .{@typeName(search)});
         var it = ctx.dense.iterator();
         while(it.next()) |entity| {
-            if(idEqualsType(entity.key_ptr.*, search)) {
+            if(idEqualsType(entity.value_ptr.*, search)) {
                 //std.log.info("Entity: {}", .{entity});
                 //std.log.info("Matched type ID: {} ({s}) to search ID {}", .{typeToId(entity.key), @typeName(search), typeToId(search)});
-                matched.append(entity.value_ptr.*) catch unreachable;
+                matched.append(entity.key_ptr.*) catch unreachable;
+            } else {
+                //std.log.info("No match: {}", .{entity});
             }
         }
         return matched.toOwnedSlice();
@@ -189,7 +194,7 @@ const Entities = struct {
         var id = ctx.entities.dense.get(entity).?;
         _ = members;
         inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
-            const comp_eql = comptime std.mem.eql(u8, decl.name, "Components");
+            const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
             if (decl.is_pub and comptime comp_eql) {
                 inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
                     if(idx == id) {

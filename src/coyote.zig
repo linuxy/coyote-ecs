@@ -11,11 +11,15 @@ pub fn main() void {
 
     _ = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
     _ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
+    _ = Entities.add(ctx, .{});
     var i: usize = 0;
     while(i < 50000) : (i += 1)
         _ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
 
-    //while(true) {
+    var anApple = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
+    const thatApple = Cast(Components.Apple).get(ctx, anApple);
+    std.log.info("that Apple: {}", .{thatApple});
+
     var apples = Entities.query(entities, Components.Apple);
     var oranges = Entities.query(entities, Components.Orange);
     defer allocator.free(apples);
@@ -29,6 +33,7 @@ pub fn main() void {
     //}
     //update FSM with yield of run?
     //describe FSM with struct?
+    //support multiple components for each entity?
 }
 
 //Components
@@ -121,6 +126,16 @@ pub fn idEqualsType(id: u32, t: anytype) bool {
     return false;
 }
 
+pub fn Cast(comptime T: type) type {
+    return struct {
+        pub fn get(ctx: *World, entity: *Entity) ?*T {
+            var id = ctx.entities.dense.get(entity.id).?;
+            var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), ctx.entities.sparse[id].data));
+            return field_ptr;
+        }
+    };
+}
+
 const Entities = struct {
     len: u32 = 0,
     sparse: []Entity,
@@ -138,10 +153,14 @@ const Entities = struct {
         while(ctx.entities.sparse[ctx.entities.free_idx].alive == true)
             ctx.entities.free_idx = ctx.entities.alive + 1;
 
-        var ref = allocator.create(@TypeOf(entity)) catch unreachable;
-        ref.* = entity;
+        if(@sizeOf(@TypeOf(entity)) > 0) {
+            var ref = allocator.create(@TypeOf(entity)) catch unreachable;
+            ref.* = entity;
 
-        ctx.entities.sparse[ctx.entities.free_idx] = Entity{.id = ctx.entities.free_idx, .data = ref, .alive = true};
+            ctx.entities.sparse[ctx.entities.free_idx] = Entity{.id = ctx.entities.free_idx, .data = ref, .alive = true};
+        } else {
+            ctx.entities.sparse[ctx.entities.free_idx] = Entity{.id = ctx.entities.free_idx, .data = null, .alive = true};
+        }
         ctx.entities.dense.put(ctx.entities.free_idx, typeToId(entity)) catch unreachable;
         ctx.entities.alive += 1;
         ctx.entities.free_idx += 1;

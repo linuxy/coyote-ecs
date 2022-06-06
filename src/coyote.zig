@@ -10,22 +10,24 @@ pub fn main() void {
     var entities = &ctx.entities;
 
     //Create an entity and add a component
-    _ = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
-    _ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
+    var anOrange = Entities.create(ctx);
+    _ = anOrange;
+    //_ = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
+    //_ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
 
     //Create an entity
-    _ = Entities.add(ctx, .{});
+    try anOrange.attach(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
 
-    var i: usize = 0;
-    while(i < 50000) : (i += 1)
-        _ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
-
-    var anApple = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
-
-    //Get an entity by reference
-    const thatApple = Cast(Components.Apple).get(ctx, anApple);
-    std.log.info("that Apple: {}", .{thatApple});
-
+//    var i: usize = 0;
+//    while(i < 50000) : (i += 1)
+//        _ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
+//
+//    var anApple = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
+//
+//    //Get an entity by reference
+//    const thatApple = Cast(Components.Apple).get(ctx, anApple);
+//    std.log.info("that Apple: {}", .{thatApple});
+//
     var apples = Entities.query(entities, Components.Apple);
     var oranges = Entities.query(entities, Components.Orange);
     defer allocator.free(apples);
@@ -34,8 +36,8 @@ pub fn main() void {
     Systems.run(Grow, .{ctx, apples});
     Systems.run(Grow, .{ctx, oranges});
     Systems.run(Harvest, .{ctx});
-    Entities.remove(ctx, oranges); //Rotten
-    std.log.info("Entities: {}", .{Entities.count(ctx)});
+//    Entities.remove(ctx, oranges); //Rotten
+//    std.log.info("Entities: {}", .{Entities.count(ctx)});
     //}
     //update FSM with yield of run?
     //describe FSM with struct?
@@ -74,6 +76,7 @@ pub fn Harvest(ctx: *World) void {
         //yield
         _ = entity;
         i += 1;
+        std.log.info("Harvest: {}", .{entity});
         _ = Entities.set(ctx, entity, .{ .harvested = true });
     }
     std.log.info("Harvested {} fruits.", .{i});
@@ -95,6 +98,18 @@ const Entity = struct {
     id: u32,
     data: ?*anyopaque,
     alive: bool,
+
+    pub fn attach(self: *Entity, ctx: *World, entity: anytype) !void {
+        if(@sizeOf(@TypeOf(entity)) > 0) {
+            var ref = allocator.create(@TypeOf(entity)) catch unreachable;
+            ref.* = entity;
+
+            ctx.entities.sparse[self.id] = Entity{.id = self.id, .data = ref, .alive = true};
+        } else {
+            ctx.entities.sparse[self.id] = Entity{.id = self.id, .data = null, .alive = true};
+        }
+        ctx.entities.dense.put(self.id, typeToId(entity)) catch unreachable;
+    }
 };
 
 pub fn typeToId(t: anytype) u32 {
@@ -150,7 +165,7 @@ const Entities = struct {
     free_idx: u32 = 0,
     resized: u32 = 0,
 
-    pub fn add(ctx: *World, entity: anytype) *Entity {
+    pub fn create(ctx: *World) *Entity {
         //create sparse list of entities
         if(ctx.entities.alive + 1 > ctx.entities.len)
             sparse_resize(ctx);
@@ -159,15 +174,8 @@ const Entities = struct {
         while(ctx.entities.sparse[ctx.entities.free_idx].alive == true)
             ctx.entities.free_idx = ctx.entities.alive + 1;
 
-        if(@sizeOf(@TypeOf(entity)) > 0) {
-            var ref = allocator.create(@TypeOf(entity)) catch unreachable;
-            ref.* = entity;
-
-            ctx.entities.sparse[ctx.entities.free_idx] = Entity{.id = ctx.entities.free_idx, .data = ref, .alive = true};
-        } else {
-            ctx.entities.sparse[ctx.entities.free_idx] = Entity{.id = ctx.entities.free_idx, .data = null, .alive = true};
-        }
-        ctx.entities.dense.put(ctx.entities.free_idx, typeToId(entity)) catch unreachable;
+        ctx.entities.dense.put(ctx.entities.free_idx, 1024) catch unreachable;
+        ctx.entities.sparse[ctx.entities.free_idx] = Entity{.id = ctx.entities.free_idx, .data = null, .alive = true};
         ctx.entities.alive += 1;
         ctx.entities.free_idx += 1;
 

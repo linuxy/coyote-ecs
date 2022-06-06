@@ -11,12 +11,14 @@ pub fn main() void {
 
     //Create an entity and add a component
     var anOrange = Entities.create(ctx);
-    _ = anOrange;
+    var anApple = Entities.create(ctx);
+    std.log.info("Created an Orange ID: {}", .{anOrange.id});
     //_ = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
     //_ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
 
     //Create an entity
-    try anOrange.attach(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
+    try anOrange.attach(ctx, Components.Orange{.color = 0, .sweet = true, .harvested = false});
+    try anApple.attach(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
 
 //    var i: usize = 0;
 //    while(i < 50000) : (i += 1)
@@ -77,6 +79,7 @@ pub fn Harvest(ctx: *World) void {
         _ = entity;
         i += 1;
         std.log.info("Harvest: {}", .{entity});
+        //set which component(s)?
         _ = Entities.set(ctx, entity, .{ .harvested = true });
     }
     std.log.info("Harvested {} fruits.", .{i});
@@ -96,7 +99,7 @@ const World = struct {
 
 const Entity = struct {
     id: u32,
-    data: ?*anyopaque,
+    data: [componentCount()]?*anyopaque,
     alive: bool,
 
     pub fn attach(self: *Entity, ctx: *World, entity: anytype) !void {
@@ -104,11 +107,35 @@ const Entity = struct {
             var ref = allocator.create(@TypeOf(entity)) catch unreachable;
             ref.* = entity;
 
-            ctx.entities.sparse[self.id] = Entity{.id = self.id, .data = ref, .alive = true};
-        } else {
-            ctx.entities.sparse[self.id] = Entity{.id = self.id, .data = null, .alive = true};
+            var oref = @ptrCast(?*anyopaque, ref);
+            self.data[typeToId(entity)] = oref;
+            std.log.info("Attaching to self ID: {}", .{self.id});
         }
         ctx.entities.dense.put(self.id, typeToId(entity)) catch unreachable;
+    }
+
+    //rework, rethink
+    pub fn set(ctx: *World, component: anytype, members: anytype) bool {
+        var ret: bool = false;
+        var idx: u32 = 0;
+        inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
+            const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
+            if (decl.is_pub and comptime comp_eql) {
+                inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
+                    if(idx == id) {
+                        const comp_type = @field(@field(@import("root"), decl.name), member.name);
+                        std.log.info("Comp type: {} Entity: {}", .{typeToId(@TypeOf(component)), entity});
+                        var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(component), ctx.entities.sparse[entity].data[typeToId(comp_type) - 2]));
+                        inline for (std.meta.fields(@TypeOf(members))) |sets| {
+                            @field(field_ptr, sets.name) = @field(members, sets.name);
+                        }
+                        _ = member;
+                    }
+                    idx += 1;
+                }
+            }
+        }
+        return ret;
     }
 };
 
@@ -122,6 +149,7 @@ pub fn typeToId(t: anytype) u32 {
                 if(comp_idx != null) {
                     break;
                 }
+                std.log.info("typeToId idx: {} member.name: {s}", .{idx, member.name});
                 idx += 1;
             }
         }
@@ -147,11 +175,26 @@ pub fn idEqualsType(id: u32, t: anytype) bool {
     return false;
 }
 
+pub fn componentCount() usize {
+    var idx: u32 = 0;
+    inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
+        const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
+        if (decl.is_pub and comptime comp_eql) {
+            inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
+                idx += 1;
+                _ = member;
+            }
+        }
+    }
+
+    return idx;
+}
+
 pub fn Cast(comptime T: type) type {
     return struct {
         pub fn get(ctx: *World, entity: *Entity) ?*T {
             var id = ctx.entities.dense.get(entity.id).?;
-            var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), ctx.entities.sparse[id].data));
+            var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), ctx.entities.sparse[id].data[typeToId(@TypeOf(T))]));
             return field_ptr;
         }
     };
@@ -159,7 +202,7 @@ pub fn Cast(comptime T: type) type {
 
 const Entities = struct {
     len: u32 = 0,
-    sparse: []Entity,
+    sparse: []*Entity,
     dense: std.AutoHashMap(u32, u32),
     alive: u32 = 0,
     free_idx: u32 = 0,
@@ -175,11 +218,16 @@ const Entities = struct {
             ctx.entities.free_idx = ctx.entities.alive + 1;
 
         ctx.entities.dense.put(ctx.entities.free_idx, 1024) catch unreachable;
-        ctx.entities.sparse[ctx.entities.free_idx] = Entity{.id = ctx.entities.free_idx, .data = null, .alive = true};
+        var entity = allocator.create(Entity) catch unreachable;
+        entity.id = ctx.entities.free_idx;
+        entity.alive = true;
+
+        ctx.entities.sparse[ctx.entities.free_idx] = entity;
         ctx.entities.alive += 1;
         ctx.entities.free_idx += 1;
 
-        return &ctx.entities.sparse[ctx.entities.free_idx];
+        std.log.info("Entities created: {}", .{ctx.entities.free_idx - 1});
+        return entity;
     }
 
     pub fn remove(ctx: *World, entity: []u32) void {
@@ -221,30 +269,6 @@ const Entities = struct {
         return matched.toOwnedSlice();
     }
 
-    pub fn set(ctx: *World, entity: u32, members: anytype) bool {
-        var ret: bool = false;
-        var idx: u32 = 0;
-        var id = ctx.entities.dense.get(entity).?;
-        _ = members;
-        inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
-            const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
-            if (decl.is_pub and comptime comp_eql) {
-                inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
-                    if(idx == id) {
-                        const comp_type = @field(@field(@import("root"), decl.name), member.name);
-                        var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), ctx.entities.sparse[id].data));
-                        inline for (std.meta.fields(@TypeOf(members))) |sets| {
-                            @field(field_ptr, sets.name) = @field(members, sets.name);
-                        }
-                        _ = member;
-                    }
-                    idx += 1;
-                }
-            }
-        }
-        return ret;
-    } 
-
     pub fn count(ctx: *World) u32 {
         //count of all living entities
         std.log.info("Sparse len: {}", .{ctx.entities.len});
@@ -252,10 +276,17 @@ const Entities = struct {
     }
 
     pub fn sparse_resize(ctx: *World) void {
-        if(ctx.entities.resized > 0)
-            ctx.entities.sparse = allocator.realloc(ctx.entities.sparse, CHUNK * (ctx.entities.resized + 1)) catch unreachable
-        else
-            ctx.entities.sparse = allocator.alignedAlloc(Entity, 32, CHUNK) catch unreachable;
+        if(ctx.entities.resized > 0) {
+            ctx.entities.sparse = allocator.realloc(ctx.entities.sparse, CHUNK * (ctx.entities.resized + 1)) catch unreachable;
+            //ditto down below
+        } else {
+            ctx.entities.sparse = allocator.alignedAlloc(*Entity, 32, CHUNK) catch unreachable;
+            var idx: usize = 0;
+            while(idx < CHUNK) {
+                ctx.entities.sparse[idx] = allocator.create(Entity) catch unreachable;
+                idx += 1;
+            }
+        }
 
         ctx.entities.resized += 1;
         ctx.entities.len = CHUNK * ctx.entities.resized - 1;

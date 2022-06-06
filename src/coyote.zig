@@ -9,16 +9,14 @@ pub fn main() void {
     var ctx = &World.add();
     var entities = &ctx.entities;
 
-    //Create an entity and add a component
+    //Create an entity
     var anOrange = Entities.create(ctx);
     var anApple = Entities.create(ctx);
     std.log.info("Created an Orange ID: {}", .{anOrange.id});
-    //_ = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
-    //_ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
 
-    //Create an entity
-    try anOrange.attach(ctx, Components.Orange{.color = 0, .sweet = true, .harvested = false});
-    try anApple.attach(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
+    //Attach a component
+    try anOrange.attach(Components.Orange{.color = 0, .sweet = true, .harvested = false});
+    try anApple.attach(Components.Apple{.color = 0, .sweet = true, .harvested = false});
 
 //    var i: usize = 0;
 //    while(i < 50000) : (i += 1)
@@ -38,26 +36,28 @@ pub fn main() void {
     Systems.run(Grow, .{ctx, apples});
     Systems.run(Grow, .{ctx, oranges});
     Systems.run(Harvest, .{ctx});
-//    Entities.remove(ctx, oranges); //Rotten
-//    std.log.info("Entities: {}", .{Entities.count(ctx)});
+    //    Entities.remove(ctx, oranges); //Rotten
+    std.log.info("Entities: {}", .{Entities.count(ctx)});
     //}
     //update FSM with yield of run?
     //describe FSM with struct?
     //support multiple components for each entity?
+    try anApple.detach(Components.Apple{});
+    try anOrange.detach(Components.Orange{});
 }
 
 //Components
 pub const Components = struct {
     pub const Apple = struct {
-        color: u32,
-        sweet: bool,
-        harvested: bool,
+        color: u32 = 0,
+        sweet: bool = false,
+        harvested: bool = false,
     };
 
     pub const Orange = struct {
-        color: u32,
-        sweet: bool,
-        harvested: bool,
+        color: u32 = 0,
+        sweet: bool = false,
+        harvested: bool = false,
     };
 };
 
@@ -80,7 +80,7 @@ pub fn Harvest(ctx: *World) void {
         i += 1;
         std.log.info("Harvest: {}", .{entity});
         //set which component(s)?
-        _ = Entities.set(ctx, entity, .{ .harvested = true });
+        //_ = Entities.set(ctx, entity, .{ .harvested = true });
     }
     std.log.info("Harvested {} fruits.", .{i});
 }
@@ -101,8 +101,9 @@ const Entity = struct {
     id: u32,
     data: [componentCount()]?*anyopaque,
     alive: bool,
+    world: *World,
 
-    pub fn attach(self: *Entity, ctx: *World, entity: anytype) !void {
+    pub fn attach(self: *Entity, entity: anytype) !void {
         if(@sizeOf(@TypeOf(entity)) > 0) {
             var ref = allocator.create(@TypeOf(entity)) catch unreachable;
             ref.* = entity;
@@ -111,21 +112,28 @@ const Entity = struct {
             self.data[typeToId(entity)] = oref;
             std.log.info("Attaching to self ID: {}", .{self.id});
         }
-        ctx.entities.dense.put(self.id, typeToId(entity)) catch unreachable;
+        self.world.entities.dense.put(self.id, typeToId(entity)) catch unreachable;
+    }
+
+    pub fn detach(self: *Entity, component: anytype) !void {
+        var data_ptr = @ptrCast(*@TypeOf(component), @alignCast(@alignOf(@TypeOf(component)), self.data[typeToId(component)]));
+        allocator.destroy(data_ptr);
+        std.log.info("Detaching component ID: #{}", .{typeToId(component)});
+        self.data[typeToId(component)] = null;
     }
 
     //rework, rethink
-    pub fn set(ctx: *World, component: anytype, members: anytype) bool {
+    pub fn set(self: *Entity, component: anytype, members: anytype) bool {
         var ret: bool = false;
         var idx: u32 = 0;
         inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
             const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
             if (decl.is_pub and comptime comp_eql) {
                 inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
-                    if(idx == id) {
+                    if(idx == self.id) {
                         const comp_type = @field(@field(@import("root"), decl.name), member.name);
-                        std.log.info("Comp type: {} Entity: {}", .{typeToId(@TypeOf(component)), entity});
-                        var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(component), ctx.entities.sparse[entity].data[typeToId(comp_type) - 2]));
+                        std.log.info("Comp type: {} Entity: {}", .{typeToId(@TypeOf(component)), self});
+                        var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(component), self.world.entities.sparse[self.id].data[typeToId(comp_type) - 2]));
                         inline for (std.meta.fields(@TypeOf(members))) |sets| {
                             @field(field_ptr, sets.name) = @field(members, sets.name);
                         }
@@ -147,9 +155,10 @@ pub fn typeToId(t: anytype) u32 {
             inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
                 const comp_idx = comptime std.mem.indexOf(u8, @typeName(@TypeOf(t)), member.name);
                 if(comp_idx != null) {
+                    std.log.info("typeToId MATCHED idx: {} member.name: {s}", .{idx, member.name});
                     break;
                 }
-                std.log.info("typeToId idx: {} member.name: {s}", .{idx, member.name});
+                std.log.info("typeToId UNMATCHED idx: {} member.name: {s} {s}", .{idx, member.name, @typeName(@TypeOf(t))});
                 idx += 1;
             }
         }
@@ -221,10 +230,12 @@ const Entities = struct {
         var entity = allocator.create(Entity) catch unreachable;
         entity.id = ctx.entities.free_idx;
         entity.alive = true;
+        entity.world = ctx;
 
         ctx.entities.sparse[ctx.entities.free_idx] = entity;
         ctx.entities.alive += 1;
         ctx.entities.free_idx += 1;
+        
 
         std.log.info("Entities created: {}", .{ctx.entities.free_idx - 1});
         return entity;

@@ -16,11 +16,14 @@ pub fn main() void {
     //Attach a component
     try anOrange.attach(Components.Orange{.color = 0, .sweet = true, .harvested = false});
     try anApple.attach(Components.Apple{.color = 0, .sweet = true, .harvested = false});
+    try anApple.attach(Components.Apple{.color = 0, .sweet = true, .harvested = false});
 
-//    var i: usize = 0;
-//    while(i < 50000) : (i += 1)
-//        _ = Entities.add(ctx, Components.Orange{.color = 1, .sweet = false, .harvested = false});
-//
+    var i: usize = 0;
+    while(i < 20000) : (i += 1) {
+        var anEntity = world.entities.create();
+        try anEntity.attach(Components.Orange{.color = 1, .sweet = false, .harvested = false});
+    }
+
 //    var anApple = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
 //
 //    //Get an entity by reference
@@ -36,7 +39,7 @@ pub fn main() void {
     Systems.run(Grow, .{world, oranges});
     Systems.run(Harvest, .{world});
 
-    _ = Cast(Components.Apple).get(world, anApple);
+    //_ = Cast(Components.Apple).get(world, anApple);
 
     Entities.remove(world, oranges); //Rotten
     anApple.remove();
@@ -69,7 +72,7 @@ pub fn Grow(ctx: *World, fruit: []*Entity) void {
     for(fruit[0..]) |entity| {
         //async schedule in fiber
         //yield
-        std.log.info("Growing: {}", .{entity});
+        //std.log.info("Growing: {}", .{entity.id});
         _ = entity;
         _ = ctx;
     }
@@ -82,7 +85,7 @@ pub fn Harvest(ctx: *World) void {
         //yield
         _ = entity;
         i += 1;
-        std.log.info("Harvest: {}", .{entity});
+        //std.log.info("Harvest: {}", .{entity.id});
         //set which component(s)?
         //_ = Entities.set(ctx, entity, .{ .harvested = true });
     }
@@ -106,11 +109,18 @@ const World = struct {
     }
 };
 
+const Component = struct {
+    pub fn create() !*Component {
+
+    }
+};
+
 const Entity = struct {
     id: u32,
-    data: [componentCount()]?*anyopaque,
+    data: [componentCount()][]?*anyopaque,
     alive: bool,
     world: *World,
+    components: std.AutoHashMap(u32, u32),
 
     pub fn remove(self: *Entity) void {
         if(self.alive == true) {
@@ -126,17 +136,22 @@ const Entity = struct {
             ref.* = entity;
 
             var oref = @ptrCast(?*anyopaque, ref);
-            self.data[typeToId(entity)] = oref;
-            std.log.info("Attaching to self ID: {}", .{self.id});
+            if(self.components.count() < 1) {
+                self.data[typeToId(entity)] = allocator.alloc(@TypeOf(oref), self.components.count()+1) catch unreachable;
+            } else {
+                self.data[typeToId(entity)] = allocator.realloc(self.data[typeToId(entity)], self.components.count()+1) catch unreachable;
+            }
+            //std.log.info("Attaching to self ID: {}", .{self.id});
         }
+        self.components.put(typeToId(entity), self.components.count()) catch unreachable;
         self.world.entities.dense.put(self.id, typeToId(entity)) catch unreachable;
     }
 
     pub fn detach(self: *Entity, component: anytype) !void {
         var data_ptr = @ptrCast(*@TypeOf(component), @alignCast(@alignOf(@TypeOf(component)), self.data[typeToId(component)]));
         allocator.destroy(data_ptr);
-        std.log.info("Detaching component ID: #{}", .{typeToId(component)});
-        self.data[typeToId(component)] = null;
+        //std.log.info("Detaching component ID: #{}", .{typeToId(component)});
+        self.data[typeToId(component)][0] = null;
     }
 
     pub fn get(self: *Entity, comptime T: type) type {
@@ -177,10 +192,10 @@ pub fn typeToId(t: anytype) u32 {
             inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
                 const comp_idx = comptime std.mem.indexOf(u8, @typeName(@TypeOf(t)), member.name);
                 if(comp_idx != null) {
-                    std.log.info("typeToId MATCHED idx: {} member.name: {s}", .{idx, member.name});
+                    //std.log.info("typeToId MATCHED idx: {} member.name: {s}", .{idx, member.name});
                     break;
                 }
-                std.log.info("typeToId UNMATCHED idx: {} member.name: {s} {s}", .{idx, member.name, @typeName(@TypeOf(t))});
+                //std.log.info("typeToId UNMATCHED idx: {} member.name: {s} {s}", .{idx, member.name, @typeName(@TypeOf(t))});
                 idx += 1;
             }
         }
@@ -243,7 +258,7 @@ const Entities = struct {
 
     pub fn create(ctx: *Entities) *Entity {
         //create sparse list of entities
-        std.log.info("Creating entity in @{}", .{&ctx.world});
+        //std.log.info("Creating entity in @{}", .{&ctx.world});
         if(ctx.alive + 1 > ctx.len)
             sparse_resize(ctx.world);
 
@@ -256,12 +271,13 @@ const Entities = struct {
         entity.id = ctx.free_idx;
         entity.alive = true;
         entity.world = ctx.world;
+        entity.components = std.AutoHashMap(u32, u32).init(allocator);
 
         ctx.sparse[ctx.free_idx] = entity;
         ctx.alive += 1;
         ctx.free_idx += 1;
 
-        std.log.info("Entities created: {}", .{ctx.free_idx - 1});
+        //std.log.info("Entities created: {}", .{ctx.free_idx - 1});
         return entity;
     }
 
@@ -272,7 +288,7 @@ const Entities = struct {
                 ctx.entities.sparse[@intCast(usize, ent.id)].alive = false;
                 ctx.entities.free_idx = ent.id;
                 ctx.entities.alive -= 1;
-                std.log.info("Removed entity: {}", .{ent});
+                //std.log.info("Removed entity: {}", .{ent.id});
             }
         }
     }
@@ -297,6 +313,8 @@ const Entities = struct {
     }
 
     pub fn getAll(ctx: *Entities) []*Entity {
+        //get all entities in a context, returned as slice
+        //caller owns memory
         _ = ctx;
         var matched = std.ArrayList(*Entity).init(allocator);
         var it = ctx.dense.iterator();
@@ -315,7 +333,12 @@ const Entities = struct {
     pub fn sparse_resize(ctx: *World) void {
         if(ctx.entities.resized > 0) {
             ctx.entities.sparse = allocator.realloc(ctx.entities.sparse, CHUNK * (ctx.entities.resized + 1)) catch unreachable;
-            //ditto down below
+            var idx: usize = CHUNK * ctx.entities.resized;
+            while(idx < (CHUNK * (ctx.entities.resized + 1))) {
+                ctx.entities.sparse[idx] = allocator.create(Entity) catch unreachable;
+                idx += 1;
+            }
+            std.log.info("Realloc from: {} to {}", .{CHUNK * ctx.entities.resized, CHUNK * (ctx.entities.resized + 1)});
         } else {
             ctx.entities.sparse = allocator.alignedAlloc(*Entity, 32, CHUNK) catch unreachable;
             var idx: usize = 0;
@@ -326,7 +349,8 @@ const Entities = struct {
         }
 
         ctx.entities.resized += 1;
-        ctx.entities.len = CHUNK * ctx.entities.resized - 1;
+        ctx.entities.len = CHUNK * ctx.entities.resized;
+        std.log.info("Resized to len: {}", .{ctx.entities.len});
     }
 };
 

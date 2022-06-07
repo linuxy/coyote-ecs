@@ -13,11 +13,11 @@ pub fn main() void {
     var anApple = world.entities.create();
     std.log.info("Created an Orange ID: {}", .{anOrange.id});
 
-    //Create a component
+    //Create a unique component
     var orangeComponent = world.components.create(Components.Orange);
     var appleComponent = world.components.create(Components.Apple);
 
-    //Attach and assign a component. Attach allocates a unique component.
+    //Attach and assign a component.
     try anOrange.attach(orangeComponent, .{.color = 0, .sweet = true, .harvested = false});
     try anApple.attach(appleComponent, .{.color = 0, .sweet = true, .harvested = false});
 
@@ -26,8 +26,8 @@ pub fn main() void {
     var i: usize = 0;
     while(i < 100000) : (i += 1) {
         var anEntity = world.entities.create();
-        var aComponent = world.components.create(Components.Orange);
-        try anEntity.attach(aComponent, .{.color = 1, .sweet = false, .harvested = false});
+        var anOrangeComponent = world.components.create();
+        try anEntity.attach(anOrangeComponent, .{.color = 1, .sweet = false, .harvested = false});
     }
 
 //
@@ -35,6 +35,7 @@ pub fn main() void {
 //    const thatApple = Cast(Components.Apple).get(ctx, anApple);
 //    std.log.info("that Apple: {}", .{thatApple});
 //
+    //Query entities by component
     var apples = world.entities.query(Components.Apple);
     //20ms per 100k for a query
     var oranges = world.entities.query(Components.Orange);

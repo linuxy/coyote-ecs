@@ -6,12 +6,13 @@ const CHUNK = 10000; //Allocate at a time. You want this at the same O() as # of
 const COMPONENT_CONTAINER = "Components";
 
 pub fn main() void {
-    var ctx = &World.add();
-    var entities = &ctx.entities;
+    var world = World.create();
+    //var entities = ctx.entities;
+    std.log.info("World created @{}", .{&world});
 
     //Create an entity
-    var anOrange = Entities.create(ctx);
-    var anApple = Entities.create(ctx);
+    var anOrange = world.entities.create();
+    var anApple = world.entities.create();
     std.log.info("Created an Orange ID: {}", .{anOrange.id});
 
     //Attach a component
@@ -28,16 +29,16 @@ pub fn main() void {
 //    const thatApple = Cast(Components.Apple).get(ctx, anApple);
 //    std.log.info("that Apple: {}", .{thatApple});
 //
-    var apples = Entities.query(entities, Components.Apple);
-    var oranges = Entities.query(entities, Components.Orange);
+    var apples = world.entities.query(Components.Apple);
+    var oranges = world.entities.query(Components.Orange);
     defer allocator.free(apples);
     defer allocator.free(oranges);
 
-    Systems.run(Grow, .{ctx, apples});
-    Systems.run(Grow, .{ctx, oranges});
-    Systems.run(Harvest, .{ctx});
+    Systems.run(Grow, .{world, apples});
+    Systems.run(Grow, .{world, oranges});
+    Systems.run(Harvest, .{world});
     //    Entities.remove(ctx, oranges); //Rotten
-    std.log.info("Entities: {}", .{Entities.count(ctx)});
+    std.log.info("Entities: {}", .{world.entities.count()});
     //}
     //update FSM with yield of run?
     //describe FSM with struct?
@@ -46,7 +47,7 @@ pub fn main() void {
     try anOrange.detach(Components.Orange{});
 }
 
-//Components
+//Components, must have default values
 pub const Components = struct {
     pub const Apple = struct {
         color: u32 = 0,
@@ -90,10 +91,15 @@ const World = struct {
     entities: Entities,
     systems: Systems,
 
-    pub fn add() World {
-        return World{.entities = Entities{.sparse = undefined,
-                                          .dense = std.AutoHashMap(u32, u32).init(allocator)},
-                     .systems = Systems{}} ;
+    pub fn create() *World {
+        var world = allocator.create(World) catch unreachable;
+        world.entities = Entities{.sparse = undefined,
+                                              .dense = std.AutoHashMap(u32, u32).init(allocator),
+                                              .world = undefined,
+                                 };
+        world.systems = Systems{};
+        world.entities.world = world;
+        return world;
     }
 };
 
@@ -216,28 +222,29 @@ const Entities = struct {
     alive: u32 = 0,
     free_idx: u32 = 0,
     resized: u32 = 0,
+    world: *World,
 
-    pub fn create(ctx: *World) *Entity {
+    pub fn create(ctx: *Entities) *Entity {
         //create sparse list of entities
-        if(ctx.entities.alive + 1 > ctx.entities.len)
-            sparse_resize(ctx);
+        std.log.info("Creating entity in @{}", .{&ctx.world});
+        if(ctx.alive + 1 > ctx.len)
+            sparse_resize(ctx.world);
 
         //find end of sparse array
-        while(ctx.entities.sparse[ctx.entities.free_idx].alive == true)
-            ctx.entities.free_idx = ctx.entities.alive + 1;
+        while(ctx.sparse[ctx.free_idx].alive == true)
+            ctx.free_idx = ctx.alive + 1;
 
-        ctx.entities.dense.put(ctx.entities.free_idx, 1024) catch unreachable;
+        ctx.dense.put(ctx.free_idx, 1024) catch unreachable;
         var entity = allocator.create(Entity) catch unreachable;
-        entity.id = ctx.entities.free_idx;
+        entity.id = ctx.free_idx;
         entity.alive = true;
-        entity.world = ctx;
+        entity.world = ctx.world;
 
-        ctx.entities.sparse[ctx.entities.free_idx] = entity;
-        ctx.entities.alive += 1;
-        ctx.entities.free_idx += 1;
-        
+        ctx.sparse[ctx.free_idx] = entity;
+        ctx.alive += 1;
+        ctx.free_idx += 1;
 
-        std.log.info("Entities created: {}", .{ctx.entities.free_idx - 1});
+        std.log.info("Entities created: {}", .{ctx.free_idx - 1});
         return entity;
     }
 
@@ -280,10 +287,10 @@ const Entities = struct {
         return matched.toOwnedSlice();
     }
 
-    pub fn count(ctx: *World) u32 {
+    pub fn count(ctx: *Entities) u32 {
         //count of all living entities
-        std.log.info("Sparse len: {}", .{ctx.entities.len});
-        return ctx.entities.alive;
+        std.log.info("Sparse len: {}", .{ctx.len});
+        return ctx.alive;
     }
 
     pub fn sparse_resize(ctx: *World) void {

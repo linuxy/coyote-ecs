@@ -26,8 +26,8 @@ pub fn main() void {
     var i: usize = 0;
     while(i < 100000) : (i += 1) {
         var anEntity = world.entities.create();
-        var anOrangeComponent = world.components.create();
-        try anEntity.attach(anOrangeComponent, .{.color = 1, .sweet = false, .harvested = false});
+        var anOrangeComponent = world.components.create(Components.Orange);
+        try anEntity.attach(anOrangeComponent, Components.Orange{.color = 1, .sweet = false, .harvested = false});
     }
 
 //
@@ -57,7 +57,7 @@ pub fn main() void {
     //describe FSM with struct?
     //support multiple components for each entity?
     try anApple.detach(orangeComponent);
-    try anOrange.detach(appleComponent);
+    //try anOrange.detach(appleComponent);
 }
 
 //Components, must have default values
@@ -74,12 +74,16 @@ pub const Components = struct {
         harvested: bool = false,
     };
 
-    pub fn create(world: *World, typeId: u32) !*Component {
+    world: ?*anyopaque = undefined, //Defeats cyclical reference checking
+    
+    pub fn create(comp: *Components, comp_type: anytype) *Component {
         var component = allocator.create(Component) catch unreachable;
+
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), comp.world));
 
         component.world = world;
         component.attached = false;
-        component.typeId = typeId;
+        component.typeId = typeToId(comp_type);
         component.id = world.entities.components_free_idx;
 
         world.entities.components_free_idx += 1;
@@ -125,7 +129,9 @@ const World = struct {
                                               .components = undefined,
                                  };
         world.systems = Systems{};
+        world.components = Components{};
         world.entities.world = world;
+        world.components.world = world;
         return world;
     }
 };
@@ -160,22 +166,30 @@ const Entity = struct {
             ref.* = entity;
 
             var oref = @ptrCast(?*anyopaque, ref);
+            component.data = oref;
+
+            //split by type
             if(self.components.count() < 1) {
-                self.data[typeToId(entity)] = allocator.alloc(@TypeOf(oref), self.components.count()+1) catch unreachable;
+                self.data[typeToId(entity)] = allocator.alloc(*Component, self.components.count()+1) catch unreachable;
             } else {
                 self.data[typeToId(entity)] = allocator.realloc(self.data[typeToId(entity)], self.components.count()+1) catch unreachable;
-            }
+            }            
             //std.log.info("Attaching to self ID: {}", .{self.id});
         }
+        component.owner = self.id;
+        component.attached = true;
+        //self.data[typeToId(entity)][self.components.count()] = component; //should be count of type
         self.components.put(typeToId(entity), self.components.count()) catch unreachable;
         self.world.entities.dense.put(self.id, typeToId(entity)) catch unreachable;
     }
 
-    pub fn detach(self: *Entity, component: anytype) !void {
-        var data_ptr = @ptrCast(*@TypeOf(component), @alignCast(@alignOf(@TypeOf(component)), self.data[typeToId(component)]));
-        allocator.destroy(data_ptr);
+    pub fn detach(self: *Entity, component: *Component) !void {
+        //var data_ptr = @ptrCast(*@TypeOf(IdCast(component.typeId).get()), @alignCast(@alignOf(@TypeOf(IdCast(component.typeId).get())), self.data[component.typeId]));
+        //allocator.destroy(data_ptr);
         //std.log.info("Detaching component ID: #{}", .{typeToId(component)});
-        self.data[typeToId(component)][0] = null;
+        //self.data[component.typeId][0] = null;
+        _ = self;
+        _ = component;
     }
 
     pub fn get(self: *Entity, comptime T: type) type {

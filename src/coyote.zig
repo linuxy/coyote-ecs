@@ -7,8 +7,6 @@ const COMPONENT_CONTAINER = "Components";
 
 pub fn main() void {
     var world = World.create();
-    //var entities = ctx.entities;
-    std.log.info("World created @{}", .{&world});
 
     //Create an entity
     var anOrange = world.entities.create();
@@ -37,7 +35,12 @@ pub fn main() void {
     Systems.run(Grow, .{world, apples});
     Systems.run(Grow, .{world, oranges});
     Systems.run(Harvest, .{world});
-    //    Entities.remove(ctx, oranges); //Rotten
+
+    _ = Cast(Components.Apple).get(world, anApple);
+
+    Entities.remove(world, oranges); //Rotten
+    anApple.remove();
+
     std.log.info("Entities: {}", .{world.entities.count()});
     //}
     //update FSM with yield of run?
@@ -62,11 +65,11 @@ pub const Components = struct {
     };
 };
 
-pub fn Grow(ctx: *World, fruit: []u32) void {
+pub fn Grow(ctx: *World, fruit: []*Entity) void {
     for(fruit[0..]) |entity| {
         //async schedule in fiber
         //yield
-        //std.log.info("Growing: {}", .{entity});
+        std.log.info("Growing: {}", .{entity});
         _ = entity;
         _ = ctx;
     }
@@ -109,6 +112,14 @@ const Entity = struct {
     alive: bool,
     world: *World,
 
+    pub fn remove(self: *Entity) void {
+        if(self.alive == true) {
+            self.alive = false;
+            self.world.entities.alive -= 1;
+            self.world.entities.free_idx = self.id;
+        }
+    }
+
     pub fn attach(self: *Entity, entity: anytype) !void {
         if(@sizeOf(@TypeOf(entity)) > 0) {
             var ref = allocator.create(@TypeOf(entity)) catch unreachable;
@@ -126,6 +137,11 @@ const Entity = struct {
         allocator.destroy(data_ptr);
         std.log.info("Detaching component ID: #{}", .{typeToId(component)});
         self.data[typeToId(component)] = null;
+    }
+
+    pub fn get(self: *Entity, comptime T: type) type {
+        _ = self;
+        _ = T;
     }
 
     //rework, rethink
@@ -208,8 +224,9 @@ pub fn componentCount() usize {
 pub fn Cast(comptime T: type) type {
     return struct {
         pub fn get(ctx: *World, entity: *Entity) ?*T {
+            std.log.info("Cast: {s}", .{@typeName(T)});
             var id = ctx.entities.dense.get(entity.id).?;
-            var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), ctx.entities.sparse[id].data[typeToId(@TypeOf(T))]));
+            var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), ctx.entities.sparse[id].data[typeToId(T)]));
             return field_ptr;
         }
     };
@@ -248,28 +265,30 @@ const Entities = struct {
         return entity;
     }
 
-    pub fn remove(ctx: *World, entity: []u32) void {
+    pub fn remove(ctx: *World, entity: []*Entity) void {
         //mark as removed
         for(entity[0..]) |ent| {
-            //std.log.info("Removed entity: {}", .{ent});
-            ctx.entities.sparse[@intCast(usize, ent)].alive = false;
-            ctx.entities.free_idx = ent;
-            ctx.entities.alive -= 1;
+            if(ctx.entities.sparse[@intCast(usize, ent.id)].alive == true) {
+                ctx.entities.sparse[@intCast(usize, ent.id)].alive = false;
+                ctx.entities.free_idx = ent.id;
+                ctx.entities.alive -= 1;
+                std.log.info("Removed entity: {}", .{ent});
+            }
         }
     }
 
-    pub fn query(ctx: *Entities, search: anytype) []u32 {
+    pub fn query(ctx: *Entities, search: anytype) []*Entity {
         //find all entities by search term
         _ = search;
         _ = ctx;
-        var matched = std.ArrayList(u32).init(allocator);
+        var matched = std.ArrayList(*Entity).init(allocator);
         //std.log.info("Search typeName: {s}", .{@typeName(search)});
         var it = ctx.dense.iterator();
         while(it.next()) |entity| {
             if(idEqualsType(entity.value_ptr.*, search)) {
                 //std.log.info("Entity: {}", .{entity});
                 //std.log.info("Matched type ID: {} ({s}) to search ID {}", .{typeToId(entity.key), @typeName(search), typeToId(search)});
-                matched.append(entity.key_ptr.*) catch unreachable;
+                matched.append(ctx.sparse[entity.key_ptr.*]) catch unreachable;
             } else {
                 //std.log.info("No match: {}", .{entity});
             }
@@ -277,12 +296,12 @@ const Entities = struct {
         return matched.toOwnedSlice();
     }
 
-    pub fn getAll(ctx: *Entities) []u32 {
+    pub fn getAll(ctx: *Entities) []*Entity {
         _ = ctx;
-        var matched = std.ArrayList(u32).init(allocator);
+        var matched = std.ArrayList(*Entity).init(allocator);
         var it = ctx.dense.iterator();
         while(it.next()) |entity| {
-            matched.append(entity.value_ptr.*) catch unreachable;
+            matched.append(ctx.sparse[entity.value_ptr.*]) catch unreachable;
         }
         return matched.toOwnedSlice();
     }

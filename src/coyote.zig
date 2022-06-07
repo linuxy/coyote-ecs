@@ -13,44 +13,50 @@ pub fn main() void {
     var anApple = world.entities.create();
     std.log.info("Created an Orange ID: {}", .{anOrange.id});
 
-    //Attach a component
-    try anOrange.attach(Components.Orange{.color = 0, .sweet = true, .harvested = false});
-    try anApple.attach(Components.Apple{.color = 0, .sweet = true, .harvested = false});
-    try anApple.attach(Components.Apple{.color = 0, .sweet = true, .harvested = false});
+    //Create a component
+    var orangeComponent = world.components.create(Components.Orange);
+    var appleComponent = world.components.create(Components.Apple);
 
+    //Attach and assign a component. Attach allocates a unique component.
+    try anOrange.attach(orangeComponent, .{.color = 0, .sweet = true, .harvested = false});
+    try anApple.attach(appleComponent, .{.color = 0, .sweet = true, .harvested = false});
+
+    //70ms per 100k create
+    //80ms per 100k attach
     var i: usize = 0;
-    while(i < 20000) : (i += 1) {
+    while(i < 100000) : (i += 1) {
         var anEntity = world.entities.create();
-        try anEntity.attach(Components.Orange{.color = 1, .sweet = false, .harvested = false});
+        var aComponent = world.components.create(Components.Orange);
+        try anEntity.attach(aComponent, .{.color = 1, .sweet = false, .harvested = false});
     }
 
-//    var anApple = Entities.add(ctx, Components.Apple{.color = 0, .sweet = true, .harvested = false});
 //
 //    //Get an entity by reference
 //    const thatApple = Cast(Components.Apple).get(ctx, anApple);
 //    std.log.info("that Apple: {}", .{thatApple});
 //
     var apples = world.entities.query(Components.Apple);
+    //20ms per 100k for a query
     var oranges = world.entities.query(Components.Orange);
     defer allocator.free(apples);
     defer allocator.free(oranges);
 
     Systems.run(Grow, .{world, apples});
+    //20ms per 100k to run a system
     Systems.run(Grow, .{world, oranges});
     Systems.run(Harvest, .{world});
 
-    //_ = Cast(Components.Apple).get(world, anApple);
-
+    //12ms per 100k delete
     Entities.remove(world, oranges); //Rotten
     anApple.remove();
 
     std.log.info("Entities: {}", .{world.entities.count()});
-    //}
+
     //update FSM with yield of run?
     //describe FSM with struct?
     //support multiple components for each entity?
-    try anApple.detach(Components.Apple{});
-    try anOrange.detach(Components.Orange{});
+    try anApple.detach(orangeComponent);
+    try anOrange.detach(appleComponent);
 }
 
 //Components, must have default values
@@ -66,6 +72,18 @@ pub const Components = struct {
         sweet: bool = false,
         harvested: bool = false,
     };
+
+    pub fn create(world: *World, typeId: u32) !*Component {
+        var component = allocator.create(Component) catch unreachable;
+
+        component.world = world;
+        component.attached = false;
+        component.typeId = typeId;
+        component.id = world.entities.components_free_idx;
+
+        world.entities.components_free_idx += 1;
+        return component;
+    }
 };
 
 pub fn Grow(ctx: *World, fruit: []*Entity) void {
@@ -95,6 +113,7 @@ pub fn Harvest(ctx: *World) void {
 const World = struct {
     //Superset of Entities and Systems
     entities: Entities,
+    components: Components,
     systems: Systems,
 
     pub fn create() *World {
@@ -102,6 +121,7 @@ const World = struct {
         world.entities = Entities{.sparse = undefined,
                                               .dense = std.AutoHashMap(u32, u32).init(allocator),
                                               .world = undefined,
+                                              .components = undefined,
                                  };
         world.systems = Systems{};
         world.entities.world = world;
@@ -110,14 +130,17 @@ const World = struct {
 };
 
 const Component = struct {
-    pub fn create() !*Component {
-
-    }
+    id: u32,
+    data: ?*anyopaque,
+    owner: u32,
+    world: *World,
+    attached: bool,
+    typeId: u32,
 };
 
 const Entity = struct {
     id: u32,
-    data: [componentCount()][]?*anyopaque,
+    data: [componentCount()][]*Component,
     alive: bool,
     world: *World,
     components: std.AutoHashMap(u32, u32),
@@ -130,7 +153,7 @@ const Entity = struct {
         }
     }
 
-    pub fn attach(self: *Entity, entity: anytype) !void {
+    pub fn attach(self: *Entity, component: *Component, entity: anytype) !void {
         if(@sizeOf(@TypeOf(entity)) > 0) {
             var ref = allocator.create(@TypeOf(entity)) catch unreachable;
             ref.* = entity;
@@ -255,6 +278,8 @@ const Entities = struct {
     free_idx: u32 = 0,
     resized: u32 = 0,
     world: *World,
+    components: []*Component,
+    components_free_idx: u32 = 0,
 
     pub fn create(ctx: *Entities) *Entity {
         //create sparse list of entities

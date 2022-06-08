@@ -29,7 +29,7 @@ pub fn main() !void {
     //70ms per 100k create
     //80ms per 100k attach
 
-    //Create 100k entities and attach, detach and destroy 100k unique components
+    //Create 100k entities and attach 100k unique components
     var i: usize = 0;
     while(i < 100000) : (i += 1) {
         var anEntity = world.entities.create();
@@ -66,6 +66,7 @@ pub fn main() !void {
     try anApple.detach(appleComponent);
 
     //Destroy a component and free it's memory, irrespective of whether it's attached or not
+    //BUG? Looks to be destroying all components?
     anOrange.destroy(orangeComponent, Components.Orange);
     anApple.destroy(appleComponent, Components.Apple);
 }
@@ -109,9 +110,28 @@ pub const Components = struct {
     pub fn deinit(ctx: *Components) void {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
+        //This should instead destroy all components in a separately managed context, not by entity
         for(world.entities.getAll()) |entity| {
             //destroy all components and data
-            _ = entity;
+            for(entity.components.items) |component| {
+                inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
+                    const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
+                    if (decl.is_pub and comptime comp_eql) {
+                        inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member, did| {
+                            if(comptime !std.mem.eql(u8, member.name, "create") and !std.mem.eql(u8, member.name, "deinit") and !std.mem.eql(u8, member.name, "world")) {
+                                if(did != component.typeId.?) {
+                                    var member_type = @field(@field(@import("root"), decl.name), member.name){};
+                                    _ = member_type;
+                                    std.log.info("matched component in deinit() {s}", .{member.name});
+                                    allocator.destroy(Cast(@TypeOf(member_type)).get(component).?);
+                                } else {
+                                    //std.log.info("unmatched component in deinit() {} {} {s}", .{did, component.typeId.?, member.name});
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 };

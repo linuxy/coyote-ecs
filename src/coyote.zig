@@ -26,7 +26,7 @@ pub fn main() !void {
 
     //Create 100k entities and attach, detach and destroy 100k unique components
     var i: usize = 0;
-    while(i < 100000) : (i += 1) {
+    while(i < 5) : (i += 1) {
         var anEntity = world.entities.create();
         var anOrangeComponent = try world.components.create(Components.Orange{});
         try anEntity.attach(anOrangeComponent, Components.Orange{.color = 1, .sweet = false, .harvested = false});
@@ -92,7 +92,7 @@ pub const Components = struct {
 
         component.world = world;
         component.attached = false;
-        component.typeId = typeToId(comp_type);
+        component.typeId = null;
         component.id = world.entities.components_free_idx;
 
         //std.log.info("Created component of TypeId: {}", .{component.typeId});
@@ -115,16 +115,21 @@ pub fn Grow(ctx: *World, fruit: []*Entity) void {
     }
 }
 
-pub fn Harvest(ctx: *World) void {
+pub fn Harvest(world: *World) void {
     var i: usize = 0;
-    for(ctx.entities.getAll()) |entity| {
+    for(world.entities.getAll()) |entity| {
         //async schedule in fiber
         //yield
-        _ = entity;
-        i += 1;
-        //std.log.info("Harvest: {}", .{entity.id});
-        //set which component(s)?
-        //_ = Entities.set(ctx, entity, .{ .harvested = true });
+        for(entity.getComponents(Components.Orange{})) |component| {
+            std.log.info("Orange harvested", .{});
+            try entity.set(component, Components.Orange, .{.harvested = true});
+            i += 1;
+        }
+        for(entity.getComponents(Components.Apple{})) |component| {
+            std.log.info("Apple harvested", .{});
+            try entity.set(component, Components.Apple, .{.harvested = true});
+            i += 1;
+        }
     }
     std.log.info("Harvested {} fruits.", .{i});
 }
@@ -156,7 +161,7 @@ const Component = struct {
     owner: u32,
     world: *World,
     attached: bool,
-    typeId: u32,
+    typeId: ?u32 = undefined,
 };
 
 const Entity = struct {
@@ -183,6 +188,7 @@ const Entity = struct {
         }
         component.owner = self.id;
         component.attached = true;
+        component.typeId = typeToId(comp_type);
 
         self.components.append(component) catch unreachable;
         self.world.entities.dense.put(self.id, typeToId(comp_type)) catch unreachable;
@@ -213,28 +219,39 @@ const Entity = struct {
         _ = T;
     }
 
-    //rework, rethink
-    pub fn set(self: *Entity, component: anytype, members: anytype) bool {
-        var ret: bool = false;
+    pub fn getComponents(entity: *Entity, comp_type: anytype) []*Component {
+        //get all components attached to an entity, returned as slice
+        //caller owns memory
+
+        var matched = std.ArrayList(*Component).init(allocator);
+        for(entity.components.items) |component| {
+            if(typeToId(comp_type) != component.typeId) {
+                matched.append(component) catch unreachable;
+            }
+        }
+        return matched.toOwnedSlice();
+    }
+
+    pub fn set(self: *Entity, component: *Component, comp_type: anytype, members: anytype) !void {
         var idx: u32 = 0;
         inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
             const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
             if (decl.is_pub and comptime comp_eql) {
                 inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
-                    if(idx == self.id) {
-                        const comp_type = @field(@field(@import("root"), decl.name), member.name);
-                        std.log.info("Comp type: {} Entity: {}", .{typeToId(@TypeOf(component)), self});
-                        var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(component), self.world.entities.sparse[self.id].data[typeToId(comp_type) - 2]));
+                    if(idx == component.typeId.?) {
+                        var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data));
                         inline for (std.meta.fields(@TypeOf(members))) |sets| {
                             @field(field_ptr, sets.name) = @field(members, sets.name);
                         }
                         _ = member;
+                        return;
                     }
                     idx += 1;
                 }
             }
         }
-        return ret;
+        _ = self;
+        return;
     }
 };
 
@@ -292,10 +309,10 @@ pub fn componentCount() usize {
 
 pub fn Cast(comptime T: type) type {
     return struct {
-        pub fn get(ctx: *World, entity: *Entity) ?*T {
+        pub fn get(ctx: *World, component: *Component) ?*T {
             std.log.info("Cast: {s}", .{@typeName(T)});
-            var id = ctx.entities.dense.get(entity.id).?;
-            var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), ctx.entities.sparse[id].data[typeToId(T)]));
+            var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.data));
+            _ = ctx;
             return field_ptr;
         }
     };

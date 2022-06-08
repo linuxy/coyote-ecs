@@ -17,9 +17,9 @@ pub fn main() void {
     var orangeComponent = world.components.create(Components.Orange);
     var appleComponent = world.components.create(Components.Apple);
 
-    //Attach and assign a component.
-    try anOrange.attach(orangeComponent, .{.color = 0, .sweet = true, .harvested = false});
-    try anApple.attach(appleComponent, .{.color = 0, .sweet = true, .harvested = false});
+    //Attach and assign a component. Do not use an anonymous struct.
+    try anOrange.attach(orangeComponent, Components.Orange{.color = 0, .sweet = true, .harvested = false});
+    try anApple.attach(appleComponent, Components.Apple{.color = 0, .sweet = true, .harvested = false});
 
     //70ms per 100k create
     //80ms per 100k attach
@@ -56,8 +56,8 @@ pub fn main() void {
     //update FSM with yield of run?
     //describe FSM with struct?
     //support multiple components for each entity?
-    try anApple.detach(orangeComponent);
-    //try anOrange.detach(appleComponent);
+    try anOrange.detach(orangeComponent, Components.Orange);
+    try anApple.detach(appleComponent, Components.Apple);
 }
 
 //Components, must have default values
@@ -183,11 +183,13 @@ const Entity = struct {
         self.world.entities.dense.put(self.id, typeToId(entity)) catch unreachable;
     }
 
-    pub fn detach(self: *Entity, component: *Component) !void {
-        //var data_ptr = @ptrCast(*@TypeOf(IdCast(component.typeId).get()), @alignCast(@alignOf(@TypeOf(IdCast(component.typeId).get())), self.data[component.typeId]));
-        //allocator.destroy(data_ptr);
-        //std.log.info("Detaching component ID: #{}", .{typeToId(component)});
-        //self.data[component.typeId][0] = null;
+    pub fn detach(self: *Entity, component: *Component, comp_type: anytype) !void {
+        std.log.info("Detach type: {s} from ID: {}", .{@typeName(comp_type), self.id});
+
+        //Don't free if it's attached to other entities
+        var data_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data.?));
+        allocator.destroy(data_ptr);
+        component.attached = false;
         _ = self;
         _ = component;
     }

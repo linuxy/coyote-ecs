@@ -10,6 +10,7 @@ pub fn main() !void {
     //Create a world
     var world = World.create();
 
+    //20ms per 100k
     //Destroy all components, entities and the world at end of scope
     defer world.deinit();
 
@@ -62,13 +63,13 @@ pub fn main() !void {
     //describe FSM with struct?
 
     //You can detach a component and reattach it to another entity
-    try anOrange.detach(orangeComponent);
-    try anApple.detach(appleComponent);
+    //try anOrange.detach(orangeComponent);
+    //try anApple.detach(appleComponent);
 
     //Destroy a component and free it's memory, irrespective of whether it's attached or not
     //BUG? Looks to be destroying all components?
-    anOrange.destroy(orangeComponent, Components.Orange);
-    anApple.destroy(appleComponent, Components.Apple);
+    //anOrange.destroy(orangeComponent, Components.Orange);
+    //anApple.destroy(appleComponent, Components.Apple);
 }
 
 //Components, must have default values
@@ -86,47 +87,91 @@ pub const Components = struct {
     };
 
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
-    
+    len: u32,
+    alive: u32,
+    sparse: []*Component,
+    dense: std.AutoHashMap(u32, ?u32),
+    free_idx: u32 = 0,
+    resized: u32 = 0,
+    created: u32 = 0,
+
     pub fn create(comp: *Components, comp_type: anytype) !*Component {
         var component = allocator.create(Component) catch unreachable;
 
         var world = @ptrCast(*World, @alignCast(@alignOf(World), comp.world));
 
+        if(comp.alive + 1 > comp.len)
+            sparse_resize(comp);
+
+        //find end of sparse array
+        while(comp.sparse[comp.free_idx].alive == true)
+            comp.free_idx = comp.alive + 1;
+        
         component.world = world;
         component.attached = false;
         component.typeId = null;
-        component.id = world.entities.components_free_idx;
+        component.id = comp.free_idx;
+
+        comp.sparse[component.id] = component;
 
         //std.log.info("Created component of TypeId: {}", .{component.typeId});
-        world.entities.components_free_idx += 1;
-        world.entities.created += 1;
+        comp.free_idx += 1;
+        comp.created += 1;
+        comp.alive += 1;
 
+        //comp.dense.put(component.id, null) catch unreachable;
         if(typeToId(comp_type) > componentCount() - 1)
             return error.ComponentNotInContainer;
 
         return component;
     }
 
-    pub fn deinit(ctx: *Components) void {
-        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+    pub fn count(ctx: *Components) u32 {
+        //count of all living components
 
-        //This should instead destroy all components in a separately managed context, not by entity
-        for(world.entities.getAll()) |entity| {
-            //destroy all components and data
-            for(entity.components.items) |component| {
-                inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
-                    const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
-                    if (decl.is_pub and comptime comp_eql) {
-                        inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member, did| {
-                            if(comptime !std.mem.eql(u8, member.name, "create") and !std.mem.eql(u8, member.name, "deinit") and !std.mem.eql(u8, member.name, "world")) {
-                                if(did != component.typeId.?) {
-                                    var member_type = @field(@field(@import("root"), decl.name), member.name){};
-                                    _ = member_type;
-                                    std.log.info("matched component in deinit() {s}", .{member.name});
-                                    allocator.destroy(Cast(@TypeOf(member_type)).get(component).?);
-                                } else {
-                                    //std.log.info("unmatched component in deinit() {} {} {s}", .{did, component.typeId.?, member.name});
-                                }
+        std.log.info("Sparse len: {}", .{ctx.len});
+        return ctx.alive;
+    }
+
+    pub fn sparse_resize(ctx: *Components) void {
+        if(ctx.resized > 0) {
+            ctx.sparse = allocator.realloc(ctx.sparse, CHUNK * (ctx.resized + 1)) catch unreachable;
+            var idx: usize = CHUNK * ctx.resized;
+            while(idx < (CHUNK * (ctx.resized + 1))) {
+                ctx.sparse[idx] = allocator.create(Component) catch unreachable;
+                idx += 1;
+            }
+            std.log.info("Realloc components from: {} to {}", .{CHUNK * ctx.resized, CHUNK * (ctx.resized + 1)});
+        } else {
+            ctx.sparse = allocator.alignedAlloc(*Component, 32, CHUNK) catch unreachable;
+            var idx: usize = 0;
+            while(idx < CHUNK) {
+                ctx.sparse[idx] = allocator.create(Component) catch unreachable;
+                idx += 1;
+            }
+        }
+
+        ctx.resized += 1;
+        ctx.len = CHUNK * ctx.resized;
+        std.log.info("Resized components to len: {}", .{ctx.len});
+    }
+
+    pub fn deinit(ctx: *Components) void {
+        var it = ctx.dense.iterator();
+        while(it.next()) |component| {
+            inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
+                const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
+                if (decl.is_pub and comptime comp_eql) {
+                    inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member, did| {
+                        if(comptime !std.mem.eql(u8, member.name, "create") and !std.mem.eql(u8, member.name, "deinit") and !std.mem.eql(u8, member.name, "world")
+                        and !std.mem.eql(u8, member.name, "sparse_resize") and !std.mem.eql(u8, member.name, "count")) {
+                            if(component.value_ptr.* != null and did == component.value_ptr.*.?) {
+                                var member_type = @field(@field(@import("root"), decl.name), member.name){};
+                                _ = member_type;
+                                //std.log.info("matched component in deinit() {s} x {}", .{member.name, ctx.sparse[component.key_ptr.*]});
+                                allocator.destroy(Cast(@TypeOf(member_type)).get(ctx.sparse[component.key_ptr.*]).?);
+                            } else {
+                                //std.log.info("unmatched component in deinit() {} {} {s}", .{did, component.typeId.?, member.name});
                             }
                         }
                     }
@@ -188,13 +233,14 @@ const World = struct {
         var world = allocator.create(World) catch unreachable;
         world.entities = Entities{.sparse = undefined,
                                               .dense = std.AutoHashMap(u32, u32).init(allocator),
-                                              .world = undefined,
-                                              .components = undefined,
+                                              .world = world,
                                  };
         world.systems = Systems{};
-        world.components = Components{};
-        world.entities.world = world;
-        world.components.world = world;
+        world.components = Components{.sparse = undefined,
+                                      .dense = std.AutoHashMap(u32, ?u32).init(allocator),
+                                      .world = world,
+                                      .len = 0,
+                                      .alive = 0,};
         return world;
     }
 
@@ -212,6 +258,7 @@ const Component = struct {
     world: *World,
     attached: bool,
     typeId: ?u32 = undefined,
+    alive: bool = false,
 };
 
 const Entity = struct {
@@ -241,6 +288,7 @@ const Entity = struct {
         component.typeId = typeToId(comp_type);
 
         self.components.append(component) catch unreachable;
+        self.world.components.dense.put(self.id, typeToId(comp_type)) catch unreachable;
         self.world.entities.dense.put(self.id, typeToId(comp_type)) catch unreachable;
     }
 
@@ -379,8 +427,6 @@ const Entities = struct {
     free_idx: u32 = 0,
     resized: u32 = 0,
     world: *World,
-    components: []*Component,
-    components_free_idx: u32 = 0,
     created: u32 = 0,
 
     pub fn create(ctx: *Entities) *Entity {

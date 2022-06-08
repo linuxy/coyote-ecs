@@ -10,9 +10,8 @@ pub fn main() !void {
     //Create a world
     var world = World.create();
 
-    //Destroy all entities and the world at end of scope
+    //Destroy all components, entities and the world at end of scope
     defer world.deinit();
-    defer world.entities.deinit();
 
     //Create an entity
     var anOrange = world.entities.create();
@@ -106,6 +105,15 @@ pub const Components = struct {
 
         return component;
     }
+
+    pub fn deinit(ctx: *Components) void {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        for(world.entities.getAll()) |entity| {
+            //destroy all components and data
+            _ = entity;
+        }
+    }
 };
 
 pub fn Grow(fruit: []*Entity) void {
@@ -171,6 +179,8 @@ const World = struct {
     }
 
     pub fn deinit(ctx: *World) void {
+        ctx.components.deinit();
+        ctx.entities.deinit();
         allocator.destroy(ctx);
     }
 };

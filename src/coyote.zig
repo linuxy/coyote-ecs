@@ -96,8 +96,6 @@ pub const Components = struct {
     created: u32 = 0,
 
     pub fn create(comp: *Components, comp_type: anytype) !*Component {
-        var component = allocator.create(Component) catch unreachable;
-
         var world = @ptrCast(*World, @alignCast(@alignOf(World), comp.world));
 
         if(comp.alive + 1 > comp.len)
@@ -107,6 +105,8 @@ pub const Components = struct {
         while(comp.sparse[comp.free_idx].alive == true)
             comp.free_idx = comp.alive + 1;
         
+        var component = comp.sparse[comp.free_idx];
+
         component.world = world;
         component.attached = false;
         component.typeId = null;
@@ -143,7 +143,7 @@ pub const Components = struct {
             }
             std.log.info("Realloc components from: {} to {}", .{CHUNK * ctx.resized, CHUNK * (ctx.resized + 1)});
         } else {
-            ctx.sparse = allocator.alignedAlloc(*Component, 32, CHUNK) catch unreachable;
+            ctx.sparse = allocator.alloc(*Component, CHUNK) catch unreachable;
             var idx: usize = 0;
             while(idx < CHUNK) {
                 ctx.sparse[idx] = allocator.create(Component) catch unreachable;
@@ -440,7 +440,8 @@ const Entities = struct {
             ctx.free_idx = ctx.alive + 1;
 
         ctx.dense.put(ctx.free_idx, 1024) catch unreachable;
-        var entity = allocator.create(Entity) catch unreachable;
+
+        var entity = ctx.sparse[ctx.free_idx];
         entity.id = ctx.free_idx;
         entity.alive = true;
         entity.world = ctx.world;
@@ -513,7 +514,7 @@ const Entities = struct {
             }
             std.log.info("Realloc from: {} to {}", .{CHUNK * ctx.entities.resized, CHUNK * (ctx.entities.resized + 1)});
         } else {
-            ctx.entities.sparse = allocator.alignedAlloc(*Entity, 32, CHUNK) catch unreachable;
+            ctx.entities.sparse = allocator.alloc(*Entity, CHUNK) catch unreachable;
             var idx: usize = 0;
             while(idx < CHUNK) {
                 ctx.entities.sparse[idx] = allocator.create(Entity) catch unreachable;

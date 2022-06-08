@@ -23,11 +23,15 @@ pub fn main() !void {
 
     //70ms per 100k create
     //80ms per 100k attach
+
+    //Create 100k entities and attach, detach and destroy 100k unique components
     var i: usize = 0;
     while(i < 100000) : (i += 1) {
         var anEntity = world.entities.create();
         var anOrangeComponent = try world.components.create(Components.Orange{});
         try anEntity.attach(anOrangeComponent, Components.Orange{.color = 1, .sweet = false, .harvested = false});
+        try anOrange.detach(anOrangeComponent);
+        anOrange.destroy(anOrangeComponent, Components.Orange);
     }
 
 //
@@ -48,19 +52,19 @@ pub fn main() !void {
     Systems.run(Harvest, .{world});
 
     //12ms per 100k delete
-    Entities.remove(world, oranges); //Rotten
+    //Remove all entities containing an orange
+    world.entities.remove(oranges); //Rotten
     anApple.remove();
 
     std.log.info("Entities: {}", .{world.entities.count()});
     //update FSM with yield of run?
     //describe FSM with struct?
-    //support multiple components for each entity?
 
     //You can detach a component and reattach it to another entity
-    try anOrange.detach(orangeComponent, Components.Orange);
-    try anApple.detach(appleComponent, Components.Apple);
+    try anOrange.detach(orangeComponent);
+    try anApple.detach(appleComponent);
 
-    //Destroy a component and free it's memory
+    //Destroy a component and free it's memory, irrespective of whether it's attached or not
     anOrange.destroy(orangeComponent, Components.Orange);
     anApple.destroy(appleComponent, Components.Apple);
 }
@@ -169,10 +173,10 @@ const Entity = struct {
         }
     }
 
-    pub fn attach(self: *Entity, component: *Component, entity: anytype) !void {
-        if(@sizeOf(@TypeOf(entity)) > 0) {
-            var ref = allocator.create(@TypeOf(entity)) catch unreachable;
-            ref.* = entity;
+    pub fn attach(self: *Entity, component: *Component, comp_type: anytype) !void {
+        if(@sizeOf(@TypeOf(comp_type)) > 0) {
+            var ref = allocator.create(@TypeOf(comp_type)) catch unreachable;
+            ref.* = comp_type;
 
             var oref = @ptrCast(?*anyopaque, ref);
             component.data = oref;
@@ -181,11 +185,11 @@ const Entity = struct {
         component.attached = true;
 
         self.components.append(component) catch unreachable;
-        self.world.entities.dense.put(self.id, typeToId(entity)) catch unreachable;
+        self.world.entities.dense.put(self.id, typeToId(comp_type)) catch unreachable;
     }
 
-    pub fn detach(self: *Entity, component: *Component, comp_type: anytype) !void {
-        std.log.info("Detach type: {s} from ID: {} typeId: {}", .{@typeName(comp_type), self.id, component.typeId});
+    pub fn detach(self: *Entity, component: *Component) !void {
+        //std.log.info("Detach type: {s} from ID: {} typeId: {}", .{@typeName(comp_type), self.id, component.typeId});
 
         for(self.components.items) |item, i| {
             if(component == item) {
@@ -196,9 +200,8 @@ const Entity = struct {
     }
 
     pub fn destroy(self: *Entity, component: *Component, comp_type: anytype) void {
-        std.log.info("Destroy component type: {s}", .{@typeName(comp_type)});
+        //std.log.info("Destroy component type: {s}", .{@typeName(comp_type)});
 
-        //Don't free if it's attached to other entities
         var data_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data.?));
         allocator.destroy(data_ptr);
         component.attached = false;
@@ -334,13 +337,13 @@ const Entities = struct {
         return entity;
     }
 
-    pub fn remove(ctx: *World, entity: []*Entity) void {
+    pub fn remove(ctx: *Entities, entity: []*Entity) void {
         //mark as removed
         for(entity[0..]) |ent| {
-            if(ctx.entities.sparse[@intCast(usize, ent.id)].alive == true) {
-                ctx.entities.sparse[@intCast(usize, ent.id)].alive = false;
-                ctx.entities.free_idx = ent.id;
-                ctx.entities.alive -= 1;
+            if(ctx.sparse[@intCast(usize, ent.id)].alive == true) {
+                ctx.sparse[@intCast(usize, ent.id)].alive = false;
+                ctx.free_idx = ent.id;
+                ctx.alive -= 1;
                 //std.log.info("Removed entity: {}", .{ent.id});
             }
         }

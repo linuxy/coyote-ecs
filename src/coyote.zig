@@ -5,7 +5,7 @@ var allocator = std.heap.c_allocator;
 const CHUNK = 10000; //Allocate at a time. You want this at the same O() as # of entities
 const COMPONENT_CONTAINER = "Components";
 
-pub fn main() void {
+pub fn main() !void {
     var world = World.create();
 
     //Create an entity
@@ -14,8 +14,8 @@ pub fn main() void {
     std.log.info("Created an Orange ID: {}", .{anOrange.id});
 
     //Create a unique component
-    var orangeComponent = world.components.create(Components.Orange);
-    var appleComponent = world.components.create(Components.Apple);
+    var orangeComponent = try world.components.create(Components.Orange{});
+    var appleComponent = try world.components.create(Components.Apple{});
 
     //Attach and assign a component. Do not use an anonymous struct.
     try anOrange.attach(orangeComponent, Components.Orange{.color = 0, .sweet = true, .harvested = false});
@@ -26,7 +26,7 @@ pub fn main() void {
     var i: usize = 0;
     while(i < 100000) : (i += 1) {
         var anEntity = world.entities.create();
-        var anOrangeComponent = world.components.create(Components.Orange);
+        var anOrangeComponent = try world.components.create(Components.Orange{});
         try anEntity.attach(anOrangeComponent, Components.Orange{.color = 1, .sweet = false, .harvested = false});
     }
 
@@ -52,12 +52,17 @@ pub fn main() void {
     anApple.remove();
 
     std.log.info("Entities: {}", .{world.entities.count()});
-
     //update FSM with yield of run?
     //describe FSM with struct?
     //support multiple components for each entity?
+
+    //You can detach a component and reattach it to another entity
     try anOrange.detach(orangeComponent, Components.Orange);
     try anApple.detach(appleComponent, Components.Apple);
+
+    //Destroy a component and free it's memory
+    anOrange.destroy(orangeComponent, Components.Orange);
+    anApple.destroy(appleComponent, Components.Apple);
 }
 
 //Components, must have default values
@@ -76,7 +81,7 @@ pub const Components = struct {
 
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     
-    pub fn create(comp: *Components, comp_type: anytype) *Component {
+    pub fn create(comp: *Components, comp_type: anytype) !*Component {
         var component = allocator.create(Component) catch unreachable;
 
         var world = @ptrCast(*World, @alignCast(@alignOf(World), comp.world));
@@ -86,7 +91,12 @@ pub const Components = struct {
         component.typeId = typeToId(comp_type);
         component.id = world.entities.components_free_idx;
 
+        //std.log.info("Created component of TypeId: {}", .{component.typeId});
         world.entities.components_free_idx += 1;
+
+        if(typeToId(comp_type) > componentCount() - 1)
+            return error.ComponentNotInContainer;
+
         return component;
     }
 };
@@ -147,10 +157,9 @@ const Component = struct {
 
 const Entity = struct {
     id: u32,
-    data: [componentCount()][]*Component,
     alive: bool,
     world: *World,
-    components: std.AutoHashMap(u32, u32),
+    components: std.ArrayList(*Component),
 
     pub fn remove(self: *Entity) void {
         if(self.alive == true) {
@@ -167,31 +176,33 @@ const Entity = struct {
 
             var oref = @ptrCast(?*anyopaque, ref);
             component.data = oref;
-
-            //split by type
-            if(self.components.count() < 1) {
-                self.data[typeToId(entity)] = allocator.alloc(*Component, self.components.count()+1) catch unreachable;
-            } else {
-                self.data[typeToId(entity)] = allocator.realloc(self.data[typeToId(entity)], self.components.count()+1) catch unreachable;
-            }            
-            //std.log.info("Attaching to self ID: {}", .{self.id});
         }
         component.owner = self.id;
         component.attached = true;
-        //self.data[typeToId(entity)][self.components.count()] = component; //should be count of type
-        self.components.put(typeToId(entity), self.components.count()) catch unreachable;
+
+        self.components.append(component) catch unreachable;
         self.world.entities.dense.put(self.id, typeToId(entity)) catch unreachable;
     }
 
     pub fn detach(self: *Entity, component: *Component, comp_type: anytype) !void {
-        std.log.info("Detach type: {s} from ID: {}", .{@typeName(comp_type), self.id});
+        std.log.info("Detach type: {s} from ID: {} typeId: {}", .{@typeName(comp_type), self.id, component.typeId});
+
+        for(self.components.items) |item, i| {
+            if(component == item) {
+                component.attached = false;
+                _ = self.components.swapRemove(i);
+            }
+        }
+    }
+
+    pub fn destroy(self: *Entity, component: *Component, comp_type: anytype) void {
+        std.log.info("Destroy component type: {s}", .{@typeName(comp_type)});
 
         //Don't free if it's attached to other entities
         var data_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data.?));
         allocator.destroy(data_ptr);
         component.attached = false;
         _ = self;
-        _ = component;
     }
 
     pub fn get(self: *Entity, comptime T: type) type {
@@ -313,7 +324,7 @@ const Entities = struct {
         entity.id = ctx.free_idx;
         entity.alive = true;
         entity.world = ctx.world;
-        entity.components = std.AutoHashMap(u32, u32).init(allocator);
+        entity.components = std.ArrayList(*Component).init(allocator);
 
         ctx.sparse[ctx.free_idx] = entity;
         ctx.alive += 1;

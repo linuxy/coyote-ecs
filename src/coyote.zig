@@ -13,13 +13,16 @@ pub fn main() !void {
     var anApple = world.entities.create();
     std.log.info("Created an Orange ID: {}", .{anOrange.id});
 
+    std.log.info("Type Orange ID: {}", .{typeToId(Components.Orange{})});
+    std.log.info("Type Apple ID: {}", .{typeToId(Components.Apple{})});
+
     //Create a unique component
     var orangeComponent = try world.components.create(Components.Orange{});
     var appleComponent = try world.components.create(Components.Apple{});
 
     //Attach and assign a component. Do not use an anonymous struct.
-    try anOrange.attach(orangeComponent, Components.Orange{.color = 0, .sweet = true, .harvested = false});
-    try anApple.attach(appleComponent, Components.Apple{.color = 0, .sweet = true, .harvested = false});
+    try anOrange.attach(orangeComponent, Components.Orange{.color = 0, .ripe = false, .harvested = false});
+    try anApple.attach(appleComponent, Components.Apple{.color = 0, .ripe = false, .harvested = false});
 
     //70ms per 100k create
     //80ms per 100k attach
@@ -29,26 +32,22 @@ pub fn main() !void {
     while(i < 5) : (i += 1) {
         var anEntity = world.entities.create();
         var anOrangeComponent = try world.components.create(Components.Orange{});
-        try anEntity.attach(anOrangeComponent, Components.Orange{.color = 1, .sweet = false, .harvested = false});
-        try anOrange.detach(anOrangeComponent);
-        anOrange.destroy(anOrangeComponent, Components.Orange);
+        try anEntity.attach(anOrangeComponent, Components.Orange{.color = 1, .ripe = false, .harvested = false});
+        //try anOrange.detach(anOrangeComponent);
+        //anOrange.destroy(anOrangeComponent, Components.Orange);
     }
 
-//
-//    //Get an entity by reference
-//    const thatApple = Cast(Components.Apple).get(ctx, anApple);
-//    std.log.info("that Apple: {}", .{thatApple});
-//
+    //typeToId whack
     //Query entities by component
-    var apples = world.entities.query(Components.Apple);
+    var apples = world.entities.query(Components.Apple{});
     //20ms per 100k for a query
-    var oranges = world.entities.query(Components.Orange);
+    var oranges = world.entities.query(Components.Orange{});
     defer allocator.free(apples);
     defer allocator.free(oranges);
 
-    Systems.run(Grow, .{world, apples});
+    Systems.run(Grow, .{apples});
     //20ms per 100k to run a system
-    Systems.run(Grow, .{world, oranges});
+    Systems.run(Grow, .{oranges});
     Systems.run(Harvest, .{world});
 
     //12ms per 100k delete
@@ -73,13 +72,13 @@ pub fn main() !void {
 pub const Components = struct {
     pub const Apple = struct {
         color: u32 = 0,
-        sweet: bool = false,
+        ripe: bool = false,
         harvested: bool = false,
     };
 
     pub const Orange = struct {
         color: u32 = 0,
-        sweet: bool = false,
+        ripe: bool = false,
         harvested: bool = false,
     };
 
@@ -105,13 +104,24 @@ pub const Components = struct {
     }
 };
 
-pub fn Grow(ctx: *World, fruit: []*Entity) void {
+pub fn Grow(fruit: []*Entity) void {
     for(fruit[0..]) |entity| {
-        //async schedule in fiber
-        //yield
-        //std.log.info("Growing: {}", .{entity.id});
-        _ = entity;
-        _ = ctx;
+        var oranges = entity.getComponents(Components.Orange{});
+        var apples = entity.getComponents(Components.Apple{});
+        defer allocator.free(oranges);
+        defer allocator.free(apples);
+
+        for(oranges) |component| {
+            std.log.info("Orange grown", .{});
+            try entity.set(component, Components.Orange, .{.ripe = true});
+        }
+
+        for(apples) |component| {
+            std.log.info("Apple grown", .{});
+            try entity.set(component, Components.Apple, .{.ripe = true});
+            var val = Cast(Components.Apple).get(component);
+            std.log.info("Apple value: {}", .{val});
+        }
     }
 }
 
@@ -121,14 +131,18 @@ pub fn Harvest(world: *World) void {
         //async schedule in fiber
         //yield
         for(entity.getComponents(Components.Orange{})) |component| {
-            std.log.info("Orange harvested", .{});
-            try entity.set(component, Components.Orange, .{.harvested = true});
-            i += 1;
+            if(Cast(Components.Orange).get(component).?.ripe == true) {
+                std.log.info("Orange harvested", .{});
+                try entity.set(component, Components.Orange, .{.harvested = true});
+                i += 1;
+            }
         }
         for(entity.getComponents(Components.Apple{})) |component| {
-            std.log.info("Apple harvested", .{});
-            try entity.set(component, Components.Apple, .{.harvested = true});
-            i += 1;
+            if(Cast(Components.Apple).get(component).?.ripe == true) {
+                std.log.info("Apple harvested", .{});
+                try entity.set(component, Components.Apple, .{.harvested = true});
+                i += 1;
+            }
         }
     }
     std.log.info("Harvested {} fruits.", .{i});
@@ -282,6 +296,7 @@ pub fn idEqualsType(id: u32, t: anytype) bool {
         if (decl.is_pub and comptime comp_eql) {
             inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
                 if(idx == id and std.mem.indexOf(u8, @typeName(t), member.name) != null) {
+                    //std.log.info("Matched idx: {} to id: {} @ {s}", .{idx, id, @typeName(t)});
                     return true;
                 }
                 idx += 1;
@@ -309,10 +324,8 @@ pub fn componentCount() usize {
 
 pub fn Cast(comptime T: type) type {
     return struct {
-        pub fn get(ctx: *World, component: *Component) ?*T {
-            std.log.info("Cast: {s}", .{@typeName(T)});
+        pub fn get(component: *Component) ?*T {
             var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.data));
-            _ = ctx;
             return field_ptr;
         }
     };
@@ -374,10 +387,10 @@ const Entities = struct {
         //std.log.info("Search typeName: {s}", .{@typeName(search)});
         var it = ctx.dense.iterator();
         while(it.next()) |entity| {
-            if(idEqualsType(entity.value_ptr.*, search)) {
+            if(idEqualsType(entity.value_ptr.*, @TypeOf(search))) {
                 //std.log.info("Entity: {}", .{entity});
-                //std.log.info("Matched type ID: {} ({s}) to search ID {}", .{typeToId(entity.key), @typeName(search), typeToId(search)});
-                matched.append(ctx.sparse[entity.key_ptr.*]) catch unreachable;
+                //std.log.info("Matched type ID: {} ({s}) to search ID {}", .{typeToId(entity.value_ptr.*), @typeName(@TypeOf(search)), typeToId(search)});
+                matched.append(ctx.sparse[entity.value_ptr.*]) catch unreachable;
             } else {
                 //std.log.info("No match: {}", .{entity});
             }

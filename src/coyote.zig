@@ -1,11 +1,26 @@
 const std = @import("std");
 
-//var allocator = std.heap.page_allocator; //wtf slow
 var allocator = std.heap.c_allocator;
 
-const CHUNK = 10000; //Allocate at a time. You want this at the same O() as # of entities
-const COMPONENT_CONTAINER = "Components";
+const MAX_ENTITIES = 96000; //Allocate at a time. You want this at the same O() as # of entities
+const MAX_COMPONENTS = 48000;
+const COMPONENT_CONTAINER = "Comp";
 const PARALLELISM = 8;
+
+//Components, must have default values
+pub const Comp = struct {
+    pub const Apple = struct {
+        color: u32 = 0,
+        ripe: bool = false,
+        harvested: bool = false,
+    };
+
+    pub const Orange = struct {
+        color: u32 = 0,
+        ripe: bool = false,
+        harvested: bool = false,
+    };
+};
 
 pub fn main() !void {
     //Create a world
@@ -13,7 +28,7 @@ pub fn main() !void {
 
     //20ms per 100k
     //Destroy all components, entities and the world at end of scope
-    defer world.deinit();
+    //defer world.deinit();
 
     //Create an entity
     var anOrange = world.entities.create();
@@ -21,12 +36,12 @@ pub fn main() !void {
     std.log.info("Created an Orange ID: {}", .{anOrange.id});
 
     //Create a unique component
-    var orangeComponent = try world.components.create(Components.Orange{});
-    var appleComponent = try world.components.create(Components.Apple{});
+    var orangeComponent = try world.components.create(Comp.Orange{});
+    var appleComponent = try world.components.create(Comp.Apple{});
 
     //Attach and assign a component. Do not use an anonymous struct.
-    try anOrange.attach(orangeComponent, Components.Orange{.color = 0, .ripe = false, .harvested = false});
-    try anApple.attach(appleComponent, Components.Apple{.color = 0, .ripe = false, .harvested = false});
+    try anOrange.attach(orangeComponent, Comp.Orange{.color = 0, .ripe = false, .harvested = false});
+    try anApple.attach(appleComponent, Comp.Apple{.color = 0, .ripe = false, .harvested = false});
 
     //70ms per 100k create
     //80ms per 100k attach
@@ -35,24 +50,26 @@ pub fn main() !void {
     var i: usize = 0;
     while(i < 10000) : (i += 1) {
         var anEntity = world.entities.create();
-        var anOrangeComponent = try world.components.create(Components.Orange{});
-        try anEntity.attach(anOrangeComponent, Components.Orange{.color = 1, .ripe = false, .harvested = false});
+        _ = anEntity;
+        var anOrangeComponent = try world.components.create(Comp.Orange{});
+        _ = anOrangeComponent;
+        try anEntity.attach(anOrangeComponent, Comp.Orange{.color = 1, .ripe = false, .harvested = false});
         //try anOrange.detach(anOrangeComponent);
         //anOrange.destroy(anOrangeComponent, Components.Orange);
     }
 
     //Query entities by component
-    var apples = world.entities.query(Components.Apple{});
+    //var apples = world.entities.query(Components.Apple{});
     //20ms per 100k for a query
-    var oranges = world.entities.query(Components.Orange{});
+    //var oranges = world.entities.query(Components.Orange{});
 
-    defer allocator.free(apples);
-    defer allocator.free(oranges);
+    //defer allocator.free(apples);
+    //defer allocator.free(oranges);
 
-    Systems.run(Grow, .{apples});
+    //Systems.run(Grow, .{apples});
     //20ms per 100k to run a system
-    Systems.run(Grow, .{oranges});
-    Systems.run(Harvest, .{world});
+    //Systems.run(Grow, .{oranges});
+    //Systems.run(Harvest, .{world});
 
     //12ms per 100k delete
     //Remove all entities containing an orange
@@ -68,52 +85,46 @@ pub fn main() !void {
     //try anApple.detach(appleComponent);
 
     //Destroy a component and free it's memory, irrespective of whether it's attached or not
-    //BUG? Looks to be destroying all components?
-    //anOrange.destroy(orangeComponent, Components.Orange);
-    //anApple.destroy(appleComponent, Components.Apple);
+    //orangeComponent.destroy(Components.Orange);
+    //appleComponent.destroy(Components.Apple);
+
+    //Destroy an entity
+    //anOrange.destroy();
+    //anApple.destroy();
+    //    while(true) {
+    //        std.os.nanosleep(0, 0);
+    //    }
 }
 
-//Components, must have default values
 pub const Components = struct {
-    pub const Apple = struct {
-        color: u32 = 0,
-        ripe: bool = false,
-        harvested: bool = false,
-    };
-
-    pub const Orange = struct {
-        color: u32 = 0,
-        ripe: bool = false,
-        harvested: bool = false,
-    };
-
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     len: u32,
     alive: u32,
-    sparse: []*Component,
-    dense: std.AutoHashMap(u32, ?u32),
+    sparse: [MAX_ENTITIES]*const Component,
+    sparse_data: [MAX_ENTITIES]Component,
     free_idx: u32 = 0,
     resized: u32 = 0,
     created: u32 = 0,
 
-    pub fn create(comp: *Components, comp_type: anytype) !*Component {
+    pub inline fn create(comp: *Components, comp_type: anytype) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), comp.world));
 
-        if(comp.alive + 1 > comp.len)
-            sparse_resize(comp);
+        //if(comp.alive + 1 > comp.len)
+        //    sparse_resize(comp);
 
         //find end of sparse array
-        while(comp.sparse[comp.free_idx].alive == true)
+        while(comp.sparse_data[comp.free_idx].allocated == true)
             comp.free_idx = comp.alive + 1;
         
-        var component = comp.sparse[comp.free_idx];
+        var component = comp.sparse_data[comp.free_idx];
+        comp.sparse[comp.free_idx] = &comp.sparse_data[comp.free_idx];
 
         component.world = world;
         component.attached = false;
         component.typeId = null;
         component.id = comp.free_idx;
 
-        comp.sparse[component.id] = component;
+        comp.sparse[component.id] = &component;
 
         //std.log.info("Created component of TypeId: {}", .{component.typeId});
         comp.free_idx += 1;
@@ -124,7 +135,7 @@ pub const Components = struct {
         if(typeToId(comp_type) > componentCount() - 1)
             return error.ComponentNotInContainer;
 
-        return component;
+        return &component;
     }
 
     pub fn count(ctx: *Components) u32 {
@@ -136,24 +147,24 @@ pub const Components = struct {
 
     pub fn sparse_resize(ctx: *Components) void {
         if(ctx.resized > 0) {
-            ctx.sparse = allocator.realloc(ctx.sparse, CHUNK * (ctx.resized + 1)) catch unreachable;
-            var idx: usize = CHUNK * ctx.resized;
-            while(idx < (CHUNK * (ctx.resized + 1))) {
+            ctx.sparse = allocator.realloc(ctx.sparse, MAX_ENTITIES * (ctx.resized + 1)) catch unreachable;
+            var idx: usize = MAX_ENTITIES * ctx.resized;
+            while(idx < (MAX_ENTITIES * (ctx.resized + 1))) {
                 ctx.sparse[idx] = allocator.create(Component) catch unreachable;
                 idx += 1;
             }
-            std.log.info("Realloc components from: {} to {}", .{CHUNK * ctx.resized, CHUNK * (ctx.resized + 1)});
+            std.log.info("Realloc components from: {} to {}", .{MAX_ENTITIES * ctx.resized, MAX_ENTITIES * (ctx.resized + 1)});
         } else {
-            ctx.sparse = allocator.alloc(*Component, CHUNK) catch unreachable;
+            ctx.sparse = allocator.alloc(*Component, MAX_ENTITIES) catch unreachable;
             var idx: usize = 0;
-            while(idx < CHUNK) {
+            while(idx < MAX_ENTITIES) {
                 ctx.sparse[idx] = allocator.create(Component) catch unreachable;
                 idx += 1;
             }
         }
 
         ctx.resized += 1;
-        ctx.len = CHUNK * ctx.resized;
+        ctx.len = MAX_ENTITIES * ctx.resized;
         std.log.info("Resized components to len: {}", .{ctx.len});
     }
 
@@ -218,14 +229,19 @@ pub fn Harvest(world: *World) void {
     for(entities) |entity| {
         //async schedule in fiber
         //yield
-        for(entity.getComponents(Components.Orange{})) |component| {
+        var oranges = entity.getComponents(Components.Orange{});
+        var apples = entity.getComponents(Components.Apple{});
+        defer allocator.free(oranges);
+        defer allocator.free(apples);
+
+        for(oranges) |component| {
             if(Cast(Components.Orange).get(component).?.ripe == true) {
                 //std.log.info("Orange harvested", .{});
                 try entity.set(component, Components.Orange, .{.harvested = true});
                 i += 1;
             }
         }
-        for(entity.getComponents(Components.Apple{})) |component| {
+        for(apples) |component| {
             if(Cast(Components.Apple).get(component).?.ripe == true) {
                 //std.log.info("Apple harvested", .{});
                 try entity.set(component, Components.Apple, .{.harvested = true});
@@ -245,15 +261,24 @@ const World = struct {
     pub fn create() *World {
         var world = allocator.create(World) catch unreachable;
         world.entities = Entities{.sparse = undefined,
-                                              .dense = std.AutoHashMap(u32, u32).init(allocator),
-                                              .world = world,
+                                  .sparse_data = undefined,
+                                  .world = world,
+                                  .overflow = undefined,
+                                  .overflow_data = undefined,
+                                  .component_mask = undefined,
                                  };
         world.systems = Systems{};
         world.components = Components{.sparse = undefined,
-                                      .dense = std.AutoHashMap(u32, ?u32).init(allocator),
+                                      .sparse_data = undefined,
                                       .world = world,
                                       .len = 0,
                                       .alive = 0,};
+        var i: usize = 0;
+        while(i < componentCount()) {
+            std.log.info("Component index: {}", .{i});
+            world.entities.component_mask[i] = std.StaticBitSet(MAX_COMPONENTS).initEmpty();
+            i += 1;
+        }
         return world;
     }
 
@@ -267,18 +292,28 @@ const World = struct {
 const Component = struct {
     id: u32,
     data: ?*anyopaque,
-    owner: u32,
-    world: *World,
+    world: ?*anyopaque,
+    owner: ?u32,
     attached: bool,
     typeId: ?u32 = undefined,
-    alive: bool = false,
+    allocated: bool = false,
+
+    pub fn destroy(self: *Component, comp_type: anytype) void {
+        //std.log.info("Destroy component type: {s}", .{@typeName(comp_type)});
+
+        var data_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), self.data.?));
+        allocator.destroy(data_ptr);
+        self.attached = false;
+        //_ = self.world.components.dense.remove(self.id);
+        _ = self;
+    }
 };
 
 const Entity = struct {
     id: u32,
     alive: bool,
-    world: *World,
-    components: std.ArrayList(*Component),
+    world: ?*anyopaque,
+    allocated: bool = false,
 
     pub fn remove(self: *Entity) void {
         if(self.alive == true) {
@@ -288,45 +323,41 @@ const Entity = struct {
         }
     }
 
-    pub fn attach(self: *Entity, component: *Component, comp_type: anytype) !void {
-        if(@sizeOf(@TypeOf(comp_type)) > 0) {
-            var ref = allocator.create(@TypeOf(comp_type)) catch unreachable;
-            ref.* = comp_type;
+    pub inline fn attach(self: *Entity, component: *Component, comp_type: anytype) !void {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), component.world));
 
-            var oref = @ptrCast(?*anyopaque, ref);
+        if(@sizeOf(@TypeOf(comp_type)) > 0) {
+//            var ref = allocator.create(@TypeOf(comp_type)) catch unreachable;
+//            ref.* = comp_type;
+//
+//            var oref = @ptrCast(?*anyopaque, ref);
+//            component.data = oref;
+            var ref = @TypeOf(comp_type){};
+            ref = comp_type;
+
+            var oref = @ptrCast(?*anyopaque, &ref);
             component.data = oref;
         }
-        component.owner = self.id;
         component.attached = true;
+        component.owner = self.id;
         component.typeId = typeToId(comp_type);
-
-        self.components.append(component) catch unreachable;
-        self.world.components.dense.put(self.id, typeToId(comp_type)) catch unreachable;
-        self.world.entities.dense.put(self.id, typeToId(comp_type)) catch unreachable;
+        world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
     }
 
     pub fn deinit(self: *Entity) void {
         self.components.deinit();
     }
 
-    pub fn detach(self: *Entity, component: *Component) !void {
+    pub inline fn detach(self: *Entity, component: *Component) !void {
         //std.log.info("Detach type: {s} from ID: {} typeId: {}", .{@typeName(comp_type), self.id, component.typeId});
-
-        for(self.components.items) |item, i| {
-            if(component == item) {
-                component.attached = false;
-                _ = self.components.swapRemove(i);
-            }
-        }
+        component.attached = false;
+        component.owner = null;
+        self.world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, false);
     }
 
-    pub fn destroy(self: *Entity, component: *Component, comp_type: anytype) void {
-        //std.log.info("Destroy component type: {s}", .{@typeName(comp_type)});
-
-        var data_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data.?));
-        allocator.destroy(data_ptr);
-        component.attached = false;
-        _ = self;
+    pub fn destroy(self: *Entity) void {
+        //std.log.info("Destroy entity id: {s}", .{entity.id);
+        self.alive = false;
     }
 
     pub fn get(self: *Entity, comptime T: type) type {
@@ -410,14 +441,16 @@ pub fn idEqualsType(id: u32, t: anytype) bool {
     return false;
 }
 
-pub fn componentCount() usize {
+pub inline fn componentCount() usize {
     var idx: u32 = 0;
     inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
         const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
         if (decl.is_pub and comptime comp_eql) {
             inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
-                idx += 1;
-                _ = member;
+                if(@typeInfo(@TypeOf(member)) == .Struct) {
+                    idx += 1;
+                    _ = member;
+                }
             }
         }
     }
@@ -436,31 +469,37 @@ pub fn Cast(comptime T: type) type {
 
 const Entities = struct {
     len: u32 = 0,
-    sparse: []*Entity,
-    dense: std.AutoHashMap(u32, u32),
+    sparse: [MAX_ENTITIES]*const Entity,
+    sparse_data: [MAX_ENTITIES]Entity,
     alive: u32 = 0,
     free_idx: u32 = 0,
     resized: u32 = 0,
-    world: *World,
+    world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     created: u32 = 0,
+    overflow: []*const Entity,
+    overflow_data: []Entity,
+    component_mask: [componentCount()]std.StaticBitSet(MAX_COMPONENTS),
 
-    pub fn create(ctx: *Entities) *Entity {
+    pub inline fn create(ctx: *Entities) *Entity {
+        //most ECS cheat here and don't allocate memory until a component is assigned
+
         //create sparse list of entities
         //std.log.info("Creating entity in @{}", .{&ctx.world});
-        if(ctx.alive + 1 > ctx.len)
-            sparse_resize(ctx.world);
+        //if(ctx.alive + 1 > ctx.len)
+        //    sparse_resize(ctx.world);
 
         //find end of sparse array
-        while(ctx.sparse[ctx.free_idx].alive == true)
+        while(ctx.sparse_data[ctx.free_idx].alive == true)
             ctx.free_idx = ctx.alive + 1;
 
-        ctx.dense.put(ctx.free_idx, 1024) catch unreachable;
+        //ctx.dense.put(ctx.free_idx, 1024) catch unreachable;
+        
+        //3ms vs 16ms for dynamic vs static allocation for 100k create
 
-        var entity = ctx.sparse[ctx.free_idx];
+        var entity = &ctx.sparse_data[ctx.free_idx];
         entity.id = ctx.free_idx;
         entity.alive = true;
         entity.world = ctx.world;
-        entity.components = std.ArrayList(*Component).init(allocator);
 
         ctx.sparse[ctx.free_idx] = entity;
         ctx.alive += 1;
@@ -519,26 +558,26 @@ const Entities = struct {
         return ctx.alive;
     }
 
-    pub fn sparse_resize(ctx: *World) void {
+    pub fn sparse_resize(ctx: *Entities) void {
         if(ctx.entities.resized > 0) {
-            ctx.entities.sparse = allocator.realloc(ctx.entities.sparse, CHUNK * (ctx.entities.resized + 1)) catch unreachable;
-            var idx: usize = CHUNK * ctx.entities.resized;
-            while(idx < (CHUNK * (ctx.entities.resized + 1))) {
+            ctx.entities.sparse = allocator.realloc(ctx.entities.sparse, MAX_ENTITIES * (ctx.entities.resized + 1)) catch unreachable;
+            var idx: usize = MAX_ENTITIES * ctx.entities.resized;
+            while(idx < (MAX_ENTITIES * (ctx.entities.resized + 1))) {
                 ctx.entities.sparse[idx] = allocator.create(Entity) catch unreachable;
                 idx += 1;
             }
-            std.log.info("Realloc from: {} to {}", .{CHUNK * ctx.entities.resized, CHUNK * (ctx.entities.resized + 1)});
+            std.log.info("Realloc from: {} to {}", .{MAX_ENTITIES * ctx.entities.resized, MAX_ENTITIES * (ctx.entities.resized + 1)});
         } else {
-            ctx.entities.sparse = allocator.alloc(*Entity, CHUNK) catch unreachable;
+            ctx.entities.sparse = allocator.alloc(*Entity, MAX_ENTITIES) catch unreachable;
             var idx: usize = 0;
-            while(idx < CHUNK) {
+            while(idx < MAX_ENTITIES) {
                 ctx.entities.sparse[idx] = allocator.create(Entity) catch unreachable;
                 idx += 1;
             }
         }
 
         ctx.entities.resized += 1;
-        ctx.entities.len = CHUNK * ctx.entities.resized;
+        ctx.entities.len = MAX_ENTITIES * ctx.entities.resized;
         std.log.info("Resized to len: {}", .{ctx.entities.len});
     }
 
@@ -550,7 +589,7 @@ const Entities = struct {
         }
 
         var idx: usize = 0;
-        while(idx < (CHUNK * (ctx.resized))) {
+        while(idx < (MAX_ENTITIES * (ctx.resized))) {
             allocator.destroy(ctx.sparse[idx]);            
             idx += 1;
         }

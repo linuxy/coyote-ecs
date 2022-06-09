@@ -1,5 +1,6 @@
 const std = @import("std");
 
+//var allocator = std.heap.page_allocator; //wtf slow
 var allocator = std.heap.c_allocator;
 
 const CHUNK = 10000; //Allocate at a time. You want this at the same O() as # of entities
@@ -32,7 +33,7 @@ pub fn main() !void {
 
     //Create 100k entities and attach 100k unique components
     var i: usize = 0;
-    while(i < 100000) : (i += 1) {
+    while(i < 10000) : (i += 1) {
         var anEntity = world.entities.create();
         var anOrangeComponent = try world.components.create(Components.Orange{});
         try anEntity.attach(anOrangeComponent, Components.Orange{.color = 1, .ripe = false, .harvested = false});
@@ -157,6 +158,8 @@ pub const Components = struct {
     }
 
     pub fn deinit(ctx: *Components) void {
+        var i: usize = 0;
+        var idata: usize = 0;
         var it = ctx.dense.iterator();
         while(it.next()) |component| {
             inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
@@ -170,14 +173,21 @@ pub const Components = struct {
                                 _ = member_type;
                                 //std.log.info("matched component in deinit() {s} x {}", .{member.name, ctx.sparse[component.key_ptr.*]});
                                 allocator.destroy(Cast(@TypeOf(member_type)).get(ctx.sparse[component.key_ptr.*]).?);
-                            } else {
-                                //std.log.info("unmatched component in deinit() {} {} {s}", .{did, component.typeId.?, member.name});
+                                idata += 1;
                             }
                         }
                     }
                 }
             }
+            allocator.destroy(ctx.sparse[component.key_ptr.*]);
+            i += 1;
         }
+        while(i < ctx.len) {
+            allocator.destroy(ctx.sparse[i]);
+            i += 1;
+        }
+        std.log.info("Destroyed {} components and {} data", .{i, idata});
+        ctx.dense.deinit();
     }
 };
 
@@ -202,7 +212,10 @@ pub fn Grow(fruit: []*Entity) void {
 
 pub fn Harvest(world: *World) void {
     var i: usize = 0;
-    for(world.entities.getAll()) |entity| {
+    var entities = world.entities.getAll();
+    defer allocator.free(entities);
+
+    for(entities) |entity| {
         //async schedule in fiber
         //yield
         for(entity.getComponents(Components.Orange{})) |component| {
@@ -331,7 +344,9 @@ const Entity = struct {
                 matched.append(component) catch unreachable;
             }
         }
-        return matched.toOwnedSlice();
+        var slice = matched.toOwnedSlice();
+        matched.deinit();
+        return slice;
     }
 
     pub fn set(self: *Entity, component: *Component, comp_type: anytype, members: anytype) !void {
@@ -528,10 +543,8 @@ const Entities = struct {
     }
 
     pub fn deinit(ctx: *Entities) void {
-        //Free all components, store size, do manual free?
-
         var id: usize = 0;
-        while(id < ctx.created) {
+        while(id <= ctx.created) {
             ctx.sparse[id].deinit();
             id += 1;
         }
@@ -541,6 +554,9 @@ const Entities = struct {
             allocator.destroy(ctx.sparse[idx]);            
             idx += 1;
         }
+
+        ctx.dense.deinit();
+        std.log.info("Destroyed {} entities.", .{idx});
     }
 };
 

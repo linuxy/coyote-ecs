@@ -156,6 +156,10 @@ pub const World = struct {
         }
         return world;
     }
+
+    pub fn deinit(self: *World) void {
+        allocator.destroy(self);
+    }
 };
 
 const Component = struct {

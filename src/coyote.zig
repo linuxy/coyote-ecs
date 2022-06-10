@@ -43,12 +43,9 @@ pub fn main() !void {
     try anOrange.attach(orangeComponent, Comp.Orange{.color = 0, .ripe = false, .harvested = false});
     try anApple.attach(appleComponent, Comp.Apple{.color = 0, .ripe = false, .harvested = false});
 
-    //70ms per 100k create
-    //80ms per 100k attach
-
     //Create 100k entities and attach 100k unique components
     var i: usize = 0;
-    while(i < 10000) : (i += 1) {
+    while(i < 100) : (i += 1) {
         var anEntity = world.entities.create();
         _ = anEntity;
         var anOrangeComponent = try world.components.create(Comp.Orange{});
@@ -57,6 +54,18 @@ pub fn main() !void {
         //try anOrange.detach(anOrangeComponent);
         //anOrange.destroy(anOrangeComponent, Components.Orange);
     }
+
+    var it = world.entities.iterator();
+    while(it.next()) |entity| {
+        _ = entity;
+    }
+
+    var orange = world.components.iterator();
+    while(orange.next()) |component| {
+        _ = component;
+    }
+
+    _ = orange;
 
     //Query entities by component
     //var apples = world.entities.query(Components.Apple{});
@@ -106,36 +115,35 @@ pub const Components = struct {
     resized: u32 = 0,
     created: u32 = 0,
 
-    pub inline fn create(comp: *Components, comp_type: anytype) !*Component {
-        var world = @ptrCast(*World, @alignCast(@alignOf(World), comp.world));
+    pub inline fn create(ctx: *Components, comp_type: anytype) !*Component {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         //if(comp.alive + 1 > comp.len)
         //    sparse_resize(comp);
 
         //find end of sparse array
-        while(comp.sparse_data[comp.free_idx].allocated == true)
-            comp.free_idx = comp.alive + 1;
+        while(ctx.sparse_data[ctx.free_idx].allocated == true)
+            ctx.free_idx = ctx.alive + 1;
         
-        var component = comp.sparse_data[comp.free_idx];
-        comp.sparse[comp.free_idx] = &comp.sparse_data[comp.free_idx];
+        var component = &ctx.sparse_data[ctx.free_idx];
 
         component.world = world;
         component.attached = false;
         component.typeId = null;
-        component.id = comp.free_idx;
+        component.id = ctx.free_idx;
+        component.allocated = false;
 
-        comp.sparse[component.id] = &component;
+        ctx.sparse[ctx.free_idx] = component;
 
-        //std.log.info("Created component of TypeId: {}", .{component.typeId});
-        comp.free_idx += 1;
-        comp.created += 1;
-        comp.alive += 1;
+        //std.log.info("Created component of ID: {}", .{component.id});
+        ctx.free_idx += 1;
+        ctx.created += 1;
+        ctx.alive += 1;
 
-        //comp.dense.put(component.id, null) catch unreachable;
         if(typeToId(comp_type) > componentCount() - 1)
             return error.ComponentNotInContainer;
 
-        return &component;
+        return component;
     }
 
     pub fn count(ctx: *Components) u32 {
@@ -143,6 +151,10 @@ pub const Components = struct {
 
         std.log.info("Sparse len: {}", .{ctx.len});
         return ctx.alive;
+    }
+
+    pub fn iterator(self: *const Components) CompIterator {
+        return .{ .ctx = self };
     }
 
     pub fn sparse_resize(ctx: *Components) void {
@@ -341,6 +353,7 @@ const Entity = struct {
         component.attached = true;
         component.owner = self.id;
         component.typeId = typeToId(comp_type);
+
         world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
     }
 
@@ -365,19 +378,30 @@ const Entity = struct {
         _ = T;
     }
 
-    pub fn getComponents(entity: *Entity, comp_type: anytype) []*Component {
+    pub fn iterator(self: *const Entities) Iterator {
+        return .{ .hm = self };
+    }
+
+    pub fn getComponents(entity: *const Entity, comp_type: anytype) type {
         //get all components attached to an entity, returned as slice
         //caller owns memory
-
-        var matched = std.ArrayList(*Component).init(allocator);
-        for(entity.components.items) |component| {
-            if(typeToId(comp_type) != component.typeId) {
-                matched.append(component) catch unreachable;
+        return struct {
+            pub fn iterator(self: *const Entity) CompIterator {
+                _ = entity;
+                _ = comp_type;
+                return .{ .ctx = self };
             }
-        }
-        var slice = matched.toOwnedSlice();
-        matched.deinit();
-        return slice;
+        };
+        //var matched = std.ArrayList(*Component).init(allocator);
+        //for(entity.components.items) |component| {
+        //    if(typeToId(comp_type) != component.typeId) {
+        //        matched.append(component) catch unreachable;
+        //    }
+        //}
+        //var slice = matched.toOwnedSlice();
+        //matched.deinit();
+        //return slice;
+        //}
     }
 
     pub fn set(self: *Entity, component: *Component, comp_type: anytype, members: anytype) !void {
@@ -544,11 +568,15 @@ const Entities = struct {
         //caller owns memory
 
         var matched = std.ArrayList(*Entity).init(allocator);
-        var it = ctx.dense.iterator();
+        var it = ctx.iterator();
         while(it.next()) |entity| {
             matched.append(ctx.sparse[entity.value_ptr.*]) catch unreachable;
         }
         return matched.toOwnedSlice();
+    }
+
+    pub fn iterator(self: *const Entities) Iterator {
+        return .{ .ctx = self };
     }
 
     pub fn count(ctx: *Entities) u32 {
@@ -602,5 +630,55 @@ const Entities = struct {
 const Systems = struct {
     pub fn run(comptime f: anytype, args: anytype) void {
         @call(.{}, f, args);
+    }
+};
+
+pub const Iterator = struct {
+    ctx: *const Entities,
+    index: usize = 0,
+
+    pub fn next(it: *Iterator) ?*const Entity {
+        if (it.ctx.alive == 0) return null;
+
+        const end = it.ctx.alive;
+        var metadata = it.index;
+
+        while (metadata < end) : ({
+            metadata += 1;
+            it.index += 1;
+        }) {
+            if (it.ctx.sparse[it.index].alive) {
+                var sparse_index = it.index;
+                it.index += 1;
+                return it.ctx.sparse[sparse_index];
+            }
+        }
+
+        return null;
+    }
+};
+
+pub const CompIterator = struct {
+    ctx: *const Components,
+    index: usize = 0,
+
+    pub fn next(it: *CompIterator) ?*const Component {
+        if (it.ctx.alive == 0) return null;
+
+        const end = it.ctx.alive;
+        var metadata = it.index;
+
+        while (metadata < end) : ({
+            metadata += 1;
+            it.index += 1;
+        }) {
+            if (it.ctx.sparse[it.index].attached) {
+                var sparse_index = it.index;
+                it.index += 1;
+                return it.ctx.sparse[sparse_index];
+            }
+        }
+
+        return null;
     }
 };

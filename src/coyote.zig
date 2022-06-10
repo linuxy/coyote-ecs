@@ -42,7 +42,7 @@ pub fn main() !void {
     try anOrange.attach(orangeComponent, Comp.Orange{.color = 0, .ripe = false, .harvested = false});
     try anApple.attach(appleComponent, Comp.Apple{.color = 0, .ripe = false, .harvested = false});
 
-    //Create 100k entities and attach 100k unique components
+    //Create 20k entities and attach 20k unique components
     var i: usize = 0;
     while(i < 20000) : (i += 1) {
         var anEntity = world.entities.create();
@@ -51,6 +51,12 @@ pub fn main() !void {
     }
 
     //Filter entities by component
+    var it = world.components.iteratorFilter(Comp.Orange{});
+    i = 0;
+    while(it.next()) |component| : (i += 1) {
+        _ = component;
+    }
+    std.log.info("Orange components: {}", .{i});
 
     Systems.run(Grow, .{world});
     Systems.run(Harvest, .{world});
@@ -70,6 +76,59 @@ pub const Components = struct {
     free_idx: u32 = 0,
     resized: u32 = 0,
     created: u32 = 0,
+
+    pub const Iterator = struct {
+        ctx: *const Components,
+        index: usize = 0,
+
+        pub fn next(it: *Iterator) ?*Component {
+            if (it.ctx.alive == 0) return null;
+
+            const end = it.ctx.alive;
+            var metadata = it.index;
+
+            while (metadata < end) : ({
+                metadata += 1;
+                it.index += 1;
+            }) {
+                if (it.ctx.sparse[it.index].alive) {
+                    var sparse_index = it.index;
+                    it.index += 1;
+                    return it.ctx.sparse[sparse_index];
+                }
+            }
+
+            return null;
+        }
+    };
+
+    pub const MaskedIterator = struct {
+        ctx: *const Components,
+        index: usize = 0,
+        filter_type: u32,
+
+        pub fn next(it: *MaskedIterator) ?*Component {
+            if (it.ctx.alive == 0) return null;
+
+            var world = @ptrCast(*World, @alignCast(@alignOf(World), it.ctx.world));
+            //TODO: Count unique types
+            const end = it.ctx.alive;
+            var metadata = it.index;
+
+            while (metadata < end) : ({
+                metadata += 1;
+                it.index += 1;
+            }) {
+                if (world.entities.component_mask[it.filter_type].isSet(it.index)) {
+                    var sparse_index = it.index;
+                    it.index += 1;
+                    return it.ctx.sparse[sparse_index];
+                }
+            }
+
+            return null;
+        }
+    };
 
     pub inline fn create(ctx: *Components, comp_type: anytype) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
@@ -101,15 +160,21 @@ pub const Components = struct {
         return component;
     }
 
-    pub fn count(ctx: *Components) u32 {
+    pub inline fn count(ctx: *Components) u32 {
         //count of all living components
 
         //std.log.info("Components alive: {}", .{ctx.len});
         return ctx.alive;
     }
 
-    pub fn iterator(self: *const Components) CompIterator {
+    pub inline fn iterator(self: *const Components) Iterator {
         return .{ .ctx = self };
+    }
+
+    pub inline fn iteratorFilter(self: *const Components, comp_type: anytype) Components.MaskedIterator {
+        //get an iterator for components attached to this entity
+        return .{ .ctx = self,
+                  .filter_type = typeToId(comp_type) };
     }
 
     pub fn sparse_resize(ctx: *Components) void {
@@ -257,7 +322,7 @@ const Component = struct {
     allocated: bool = false,
     alive: bool = false,
 
-    pub fn is(self: *const Component, comp_type: anytype) bool {
+    pub inline fn is(self: *const Component, comp_type: anytype) bool {
         if(self.typeId == typeToId(comp_type)) {
             return true;
         } else {
@@ -265,7 +330,7 @@ const Component = struct {
         }
     }
 
-    pub fn set(component: *Component, comp_type: anytype, members: anytype) !void {
+    pub inline fn set(component: *Component, comp_type: anytype, members: anytype) !void {
         var idx: u32 = 0;
         inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
             const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
@@ -294,7 +359,7 @@ const Component = struct {
         world.entities.component_mask[@intCast(usize, self.typeId.?)].setValue(self.id, false);   
     }
 
-    pub fn destroy(self: *Component) void {
+    pub inline fn destroy(self: *Component) void {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
 
         self.data = null;
@@ -315,7 +380,7 @@ const Entity = struct {
     world: ?*anyopaque,
     allocated: bool = false,
 
-    pub fn remove(self: *Entity) void {
+    pub inline fn remove(self: *Entity) void {
         if(self.alive == true) {
             self.alive = false;
             self.world.entities.alive -= 1;
@@ -327,11 +392,6 @@ const Entity = struct {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), component.world));
 
         if(@sizeOf(@TypeOf(comp_type)) > 0) {
-//            var ref = allocator.create(@TypeOf(comp_type)) catch unreachable;
-//            ref.* = comp_type;
-//
-//            var oref = @ptrCast(?*anyopaque, ref);
-//            component.data = oref;
             var ref = @TypeOf(comp_type){};
             ref = comp_type;
 
@@ -345,19 +405,13 @@ const Entity = struct {
         world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
     }
 
-    pub fn deinit(self: *Entity) void {
-        self.components.deinit();
-    }
-
     pub inline fn detach(self: *Entity, component: *Component) !void {
-        //std.log.info("Detach type: {s} from ID: {} typeId: {}", .{@typeName(comp_type), self.id, component.typeId});
         component.attached = false;
         component.owner = null;
         self.world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, false);
     }
 
-    pub fn destroy(self: *Entity) void {
-        //std.log.info("Destroy entity id: {s}", .{entity.id);
+    pub inline fn destroy(self: *Entity) void {
         self.alive = false;
     }
 
@@ -366,33 +420,17 @@ const Entity = struct {
         _ = T;
     }
 
-    pub fn iterator(self: *const Entities) Iterator {
-        return .{ .hm = self };
+    pub inline fn iterator(self: *const Entities) Entities.Iterator {
+        return .{ .ctx = self };
     }
 
-    pub fn getComponents(entity: *const Entity, comp_type: anytype) type {
-        //get all components attached to an entity, returned as slice
-        //caller owns memory
-        return struct {
-            pub fn iterator(self: *const Entity) CompIterator {
-                _ = entity;
-                _ = comp_type;
-                return .{ .ctx = self };
-            }
-        };
-        //var matched = std.ArrayList(*Component).init(allocator);
-        //for(entity.components.items) |component| {
-        //    if(typeToId(comp_type) != component.typeId) {
-        //        matched.append(component) catch unreachable;
-        //    }
-        //}
-        //var slice = matched.toOwnedSlice();
-        //matched.deinit();
-        //return slice;
-        //}
+    pub inline fn filteredIterator(self: *const Entity, comp_type: anytype) Components.MaskedIterator {
+        //get an iterator for components attached to this entity
+        return .{ .ctx = self,
+                  .filter_type = typeToId(comp_type) };
     }
 
-    pub fn set(self: *Entity, component: *Component, comp_type: anytype, members: anytype) !void {
+    pub inline fn set(self: *Entity, component: *Component, comp_type: anytype, members: anytype) !void {
         var idx: u32 = 0;
         inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
             const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
@@ -415,7 +453,7 @@ const Entity = struct {
     }
 };
 
-pub fn typeToId(t: anytype) u32 {
+pub inline fn typeToId(t: anytype) u32 {
     var idx: u32 = 0;
     inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
         const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
@@ -435,7 +473,7 @@ pub fn typeToId(t: anytype) u32 {
     return idx;
 }
 
-pub fn idEqualsType(id: u32, t: anytype) bool {
+pub inline fn idEqualsType(id: u32, t: anytype) bool {
     var idx: u32 = 0;
     inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
         const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
@@ -470,7 +508,7 @@ pub inline fn componentCount() usize {
     return idx;
 }
 
-pub fn Cast(comptime T: type) type {
+pub inline fn Cast(comptime T: type) type {
     return struct {
         pub fn get(component: *Component) ?*T {
             var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.data));
@@ -489,6 +527,31 @@ const Entities = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     created: u32 = 0,
     component_mask: [componentCount()]std.StaticBitSet(MAX_COMPONENTS),
+
+    pub const Iterator = struct {
+        ctx: *const Entities,
+        index: usize = 0,
+
+        pub fn next(it: *Iterator) ?*const Entity {
+            if (it.ctx.alive == 0) return null;
+
+            const end = it.ctx.alive;
+            var metadata = it.index;
+
+            while (metadata < end) : ({
+                metadata += 1;
+                it.index += 1;
+            }) {
+                if (it.ctx.sparse[it.index].alive) {
+                    var sparse_index = it.index;
+                    it.index += 1;
+                    return it.ctx.sparse[sparse_index];
+                }
+            }
+
+            return null;
+        }
+    };
 
     pub inline fn create(ctx: *Entities) *Entity {
         //most ECS cheat here and don't allocate memory until a component is assigned
@@ -512,7 +575,7 @@ const Entities = struct {
         return entity;
     }
 
-    pub fn remove(ctx: *Entities, entity: []*Entity) void {
+    pub inline fn remove(ctx: *Entities, entity: []*Entity) void {
         //mark as removed
         for(entity[0..]) |ent| {
             if(ctx.sparse[@intCast(usize, ent.id)].alive == true) {
@@ -524,44 +587,12 @@ const Entities = struct {
         }
     }
 
-    pub fn query(ctx: *Entities, search: anytype) []*Entity {
-        //find all entities by search term
-
-        var matched = std.ArrayList(*Entity).init(allocator);
-        //std.log.info("Search typeName: {s}", .{@typeName(search)});
-        var it = ctx.dense.iterator();
-        while(it.next()) |entity| {
-            if(idEqualsType(entity.value_ptr.*, @TypeOf(search))) {
-                //std.log.info("Entity: {}", .{entity});
-                //std.log.info("Matched type ID: {} ({s}) to search ID {}", .{typeToId(entity.value_ptr.*), @typeName(@TypeOf(search)), typeToId(search)});
-                matched.append(ctx.sparse[entity.value_ptr.*]) catch unreachable;
-            } else {
-                //std.log.info("No match: {}", .{entity});
-            }
-        }
-        return matched.toOwnedSlice();
-    }
-
-    pub fn getAll(ctx: *Entities) []*Entity {
-        //get all entities in a context, returned as slice
-        //caller owns memory
-
-        var matched = std.ArrayList(*Entity).init(allocator);
-        var it = ctx.iterator();
-        while(it.next()) |entity| {
-            matched.append(ctx.sparse[entity.value_ptr.*]) catch unreachable;
-        }
-        return matched.toOwnedSlice();
-    }
-
-    pub fn iterator(self: *const Entities) Iterator {
+    pub inline fn iterator(self: *const Entities) Iterator {
         return .{ .ctx = self };
     }
 
-    pub fn count(ctx: *Entities) u32 {
+    pub inline fn count(ctx: *Entities) u32 {
         //count of all living entities
-
-        std.log.info("Sparse len: {}", .{ctx.len});
         return ctx.alive;
     }
 
@@ -609,55 +640,5 @@ const Entities = struct {
 const Systems = struct {
     pub fn run(comptime f: anytype, args: anytype) void {
         @call(.{}, f, args);
-    }
-};
-
-pub const Iterator = struct {
-    ctx: *const Entities,
-    index: usize = 0,
-
-    pub fn next(it: *Iterator) ?*const Entity {
-        if (it.ctx.alive == 0) return null;
-
-        const end = it.ctx.alive;
-        var metadata = it.index;
-
-        while (metadata < end) : ({
-            metadata += 1;
-            it.index += 1;
-        }) {
-            if (it.ctx.sparse[it.index].alive) {
-                var sparse_index = it.index;
-                it.index += 1;
-                return it.ctx.sparse[sparse_index];
-            }
-        }
-
-        return null;
-    }
-};
-
-pub const CompIterator = struct {
-    ctx: *const Components,
-    index: usize = 0,
-
-    pub fn next(it: *CompIterator) ?*Component {
-        if (it.ctx.alive == 0) return null;
-
-        const end = it.ctx.alive;
-        var metadata = it.index;
-
-        while (metadata < end) : ({
-            metadata += 1;
-            it.index += 1;
-        }) {
-            if (it.ctx.sparse[it.index].alive) {
-                var sparse_index = it.index;
-                it.index += 1;
-                return it.ctx.sparse[sparse_index];
-            }
-        }
-
-        return null;
     }
 };

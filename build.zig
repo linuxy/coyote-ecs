@@ -3,9 +3,12 @@ const std = @import("std");
 pub fn build(b: *std.build.Builder) void {
     const mode = b.standardReleaseOptions();
 
-    const exe = b.addExecutable("ecs", "src/coyote.zig");
+    const ecsPkg = std.build.Pkg{ .name = "coyote-ecs", .source = std.build.FileSource{ .path = "src/coyote.zig" }};
+
+    const exe = b.addExecutable("ecs", "examples/fruits.zig");
     exe.setBuildMode(mode);
     exe.linkLibC();
+    exe.addPackage(ecsPkg);
     exe.install();
 
     const run_cmd = exe.run();

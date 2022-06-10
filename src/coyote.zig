@@ -4,66 +4,9 @@ var allocator = std.heap.c_allocator;
 
 const MAX_ENTITIES = 96000; //Maximum number of entities alive at once
 const MAX_COMPONENTS = 48000; //Maximum number of components alive at once
-const COMPONENT_CONTAINER = "Comp"; //Struct containing component definitions
-const PARALLELISM = 8;
+const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
 
-//Components, must have default values
-pub const Comp = struct {
-    pub const Apple = struct {
-        color: u32 = 0,
-        ripe: bool = false,
-        harvested: bool = false,
-    };
-
-    pub const Orange = struct {
-        color: u32 = 0,
-        ripe: bool = false,
-        harvested: bool = false,
-    };
-};
-
-pub fn main() !void {
-    //Create a world
-    var world = World.create();
-
-    //Create an entity
-    var anOrange = try world.entities.create();
-    var anApple = try world.entities.create();
-    std.log.info("Created an Orange ID: {}", .{anOrange.id});
-
-    //Create a unique component
-    var orangeComponent = try world.components.create(Comp.Orange{});
-    var appleComponent = try world.components.create(Comp.Apple{});
-
-    //Attach and assign a component. Do not use an anonymous struct.
-    try anOrange.attach(orangeComponent, Comp.Orange{.color = 0, .ripe = false, .harvested = false});
-    try anApple.attach(appleComponent, Comp.Apple{.color = 0, .ripe = false, .harvested = false});
-
-    //Create 20k entities and attach 20k unique components
-    var i: usize = 0;
-    while(i < 20000) : (i += 1) {
-        var anEntity = try world.entities.create();
-        var anOrangeComponent = try world.components.create(Comp.Orange{});
-        try anEntity.attach(anOrangeComponent, Comp.Orange{.color = 1, .ripe = false, .harvested = false});
-    }
-
-    //Filter entities by component
-    var it = world.components.iteratorFilter(Comp.Orange{});
-    i = 0;
-    while(it.next()) |component| : (i += 1) {
-        _ = component;
-    }
-    std.log.info("Orange components: {}", .{i});
-
-    Systems.run(Grow, .{world});
-    Systems.run(Harvest, .{world});
-    Systems.run(Raze, .{world});
-
-    std.log.info("Entities: {}", .{world.entities.count()});
-    std.log.info("Components: {}", .{world.components.count()});
-}
-
-pub const Components = struct {
+pub const _Components = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     len: u32,
     alive: u32,
@@ -74,7 +17,7 @@ pub const Components = struct {
     created: u32 = 0,
 
     pub const Iterator = struct {
-        ctx: *const Components,
+        ctx: *const _Components,
         index: usize = 0,
         alive: u32 = 0,
 
@@ -100,7 +43,7 @@ pub const Components = struct {
     };
 
     pub const MaskedIterator = struct {
-        ctx: *const Components,
+        ctx: *const _Components,
         index: usize = 0,
         filter_type: u32,
         alive: u32 = 0,
@@ -128,7 +71,7 @@ pub const Components = struct {
         }
     };
 
-    pub inline fn create(ctx: *Components, comp_type: anytype) !*Component {
+    pub inline fn create(ctx: *_Components, comp_type: anytype) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         if(ctx.alive >= MAX_COMPONENTS)
@@ -168,17 +111,17 @@ pub const Components = struct {
         return component;
     }
 
-    pub inline fn count(ctx: *Components) u32 {
+    pub inline fn count(ctx: *_Components) u32 {
         //count of all living components
 
         return ctx.alive;
     }
 
-    pub inline fn iterator(self: *const Components) Iterator {
+    pub inline fn iterator(self: *const _Components) Iterator {
         return .{ .ctx = self, .alive = self.alive };
     }
 
-    pub inline fn iteratorFilter(self: *const Components, comp_type: anytype) Components.MaskedIterator {
+    pub inline fn iteratorFilter(self: *const _Components, comp_type: anytype) _Components.MaskedIterator {
         //get an iterator for components attached to this entity
         return .{ .ctx = self,
                   .filter_type = typeToId(comp_type),
@@ -186,65 +129,10 @@ pub const Components = struct {
     }
 };
 
-pub fn Grow(world: *World) void {
-    var it = world.components.iterator();
-    var i: u32 = 0;
-    while(it.next()) |component| : (i += 1) {
-        if(component.is(Comp.Orange{})) {
-            try component.set(Comp.Orange, .{.ripe = true});
-        }
-
-        if(component.is(Comp.Apple{})) {
-            try component.set(Comp.Apple, .{.ripe = true});
-        }
-
-        //Fruits fall from the tree
-        component.detach();
-    }
-    std.log.info("Fruits grown: {}", .{i});
-}
-
-pub fn Harvest(world: *World) void {
-    var it = world.components.iterator();
-    var i: u32 = 0;
-    while(it.next()) |component| {
-        //async schedule in fiber
-        //yield
-
-        if(component.is(Comp.Orange{})) {
-            if(Cast(Comp.Orange).get(component).?.ripe == true) {
-                try component.set(Comp.Orange, .{.harvested = true});
-                i += 1;
-            }
-        }
-        if(component.is(Comp.Apple{})) {
-            if(Cast(Comp.Apple).get(component).?.ripe == true) {
-                try component.set(Comp.Apple, .{.harvested = true});
-                i += 1;
-            }
-        }
-        component.destroy();
-    }
-    
-    std.log.info("Fruits harvested: {}", .{i});
-}
-
-pub fn Raze(world: *World) void {
-    var it = world.entities.iterator();
-    var i: u32 = 0;
-
-    while(it.next()) |entity| {
-        entity.destroy();
-        i += 1;
-    }
-
-    std.log.info("Entities destroyed: {}", .{i});
-}
-
-const World = struct {
+pub const World = struct {
     //Superset of Entities and Systems
     entities: Entities,
-    components: Components,
+    components: _Components,
     systems: Systems,
 
     pub fn create() *World {
@@ -255,7 +143,7 @@ const World = struct {
                                   .component_mask = undefined,
                                  };
         world.systems = Systems{};
-        world.components = Components{.sparse = undefined,
+        world.components = _Components{.sparse = undefined,
                                       .sparse_data = undefined,
                                       .world = world,
                                       .len = 0,
@@ -388,7 +276,7 @@ const Entity = struct {
         return .{ .ctx = self, .alive = self.alive };
     }
 
-    pub inline fn filteredIterator(self: *Entity, comp_type: anytype) Components.MaskedIterator {
+    pub inline fn filteredIterator(self: *Entity, comp_type: anytype) _Components.MaskedIterator {
         //get an iterator for components attached to this entity
         return .{ .ctx = self,
                   .filter_type = typeToId(comp_type),
@@ -565,7 +453,7 @@ const Entities = struct {
     }
 };
 
-const Systems = struct {
+pub const Systems = struct {
     pub fn run(comptime f: anytype, args: anytype) void {
         @call(.{}, f, args);
     }

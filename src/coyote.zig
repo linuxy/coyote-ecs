@@ -44,7 +44,7 @@ pub fn main() !void {
 
     //Create 100k entities and attach 100k unique components
     var i: usize = 0;
-    while(i < 10000) : (i += 1) {
+    while(i < 20000) : (i += 1) {
         var anEntity = world.entities.create();
         var anOrangeComponent = try world.components.create(Comp.Orange{});
         try anEntity.attach(anOrangeComponent, Comp.Orange{.color = 1, .ripe = false, .harvested = false});
@@ -56,6 +56,7 @@ pub fn main() !void {
     Systems.run(Harvest, .{world});
 
     std.log.info("Entities: {}", .{world.entities.count()});
+    std.log.info("Components: {}", .{world.components.count()});
     //update FSM with yield of run?
     //describe FSM with struct?
 }
@@ -103,7 +104,7 @@ pub const Components = struct {
     pub fn count(ctx: *Components) u32 {
         //count of all living components
 
-        std.log.info("Sparse len: {}", .{ctx.len});
+        //std.log.info("Components alive: {}", .{ctx.len});
         return ctx.alive;
     }
 
@@ -205,7 +206,7 @@ pub fn Harvest(world: *World) void {
                 i += 1;
             }
         }
-        component.destroy();
+        //component.destroy();
     }
     
     std.log.info("Fruits harvested: {}", .{i});
@@ -296,18 +297,15 @@ const Component = struct {
     pub fn destroy(self: *Component) void {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
 
-        //var data_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), self.data.?));
-        //allocator.destroy(data_ptr);
         self.data = null;
-
         self.attached = false;
         self.owner = null;
         self.typeId = null;
         self.allocated = false;
         self.alive = false;
 
-        world.entities.alive -= 1;
-        world.entities.free_idx = self.id;
+        world.components.alive -= 1;
+        world.components.free_idx = self.id;
     }
 };
 

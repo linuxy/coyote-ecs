@@ -84,9 +84,6 @@ pub fn Harvest(world: *World) void {
     var it = world.components.iterator();
     var i: u32 = 0;
     while(it.next()) |component| {
-        //async schedule in fiber
-        //yield
-
         if(component.is(Components.Orange{})) {
             if(Cast(Components.Orange).get(component).?.ripe == true) {
                 try component.set(Components.Orange, .{.harvested = true});

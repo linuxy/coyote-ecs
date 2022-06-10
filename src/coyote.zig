@@ -2,9 +2,9 @@ const std = @import("std");
 
 var allocator = std.heap.c_allocator;
 
-const MAX_ENTITIES = 96000; //Allocate at a time. You want this at the same O() as # of entities
-const MAX_COMPONENTS = 48000;
-const COMPONENT_CONTAINER = "Comp";
+const MAX_ENTITIES = 96000; //Maximum number of entities alive at once
+const MAX_COMPONENTS = 48000; //Maximum number of components alive at once
+const COMPONENT_CONTAINER = "Comp"; //Struct containing component definitions
 const PARALLELISM = 8;
 
 //Components, must have default values
@@ -61,8 +61,6 @@ pub fn main() !void {
 
     std.log.info("Entities: {}", .{world.entities.count()});
     std.log.info("Components: {}", .{world.components.count()});
-    //update FSM with yield of run?
-    //describe FSM with struct?
 }
 
 pub const Components = struct {

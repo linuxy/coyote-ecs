@@ -26,7 +26,6 @@ pub fn main() !void {
     //Create a world
     var world = World.create();
 
-    //20ms per 100k
     //Destroy all components, entities and the world at end of scope
     //defer world.deinit();
 
@@ -47,25 +46,11 @@ pub fn main() !void {
     var i: usize = 0;
     while(i < 100) : (i += 1) {
         var anEntity = world.entities.create();
-        _ = anEntity;
         var anOrangeComponent = try world.components.create(Comp.Orange{});
-        _ = anOrangeComponent;
         try anEntity.attach(anOrangeComponent, Comp.Orange{.color = 1, .ripe = false, .harvested = false});
         //try anOrange.detach(anOrangeComponent);
         //anOrange.destroy(anOrangeComponent, Components.Orange);
     }
-
-    var it = world.entities.iterator();
-    while(it.next()) |entity| {
-        _ = entity;
-    }
-
-    var orange = world.components.iterator();
-    while(orange.next()) |component| {
-        _ = component;
-    }
-
-    _ = orange;
 
     //Query entities by component
     //var apples = world.entities.query(Components.Apple{});
@@ -76,11 +61,9 @@ pub fn main() !void {
     //defer allocator.free(oranges);
 
     //Systems.run(Grow, .{apples});
-    //20ms per 100k to run a system
-    //Systems.run(Grow, .{oranges});
-    //Systems.run(Harvest, .{world});
+    Systems.run(Grow, .{world});
+    Systems.run(Harvest, .{world});
 
-    //12ms per 100k delete
     //Remove all entities containing an orange
     //world.entities.remove(oranges); //Rotten
     //anApple.remove();
@@ -214,54 +197,42 @@ pub const Components = struct {
     }
 };
 
-pub fn Grow(fruit: []*Entity) void {
-    for(fruit[0..]) |entity| {
-        var oranges = entity.getComponents(Components.Orange{});
-        var apples = entity.getComponents(Components.Apple{});
-        defer allocator.free(oranges);
-        defer allocator.free(apples);
-
-        for(oranges) |component| {
-            //std.log.info("Orange grown", .{});
-            try entity.set(component, Components.Orange, .{.ripe = true});
+pub fn Grow(world: *World) void {
+    var it = world.components.iterator();
+    var i: u32 = 0;
+    while(it.next()) |component| : (i += 1) {
+        if(component.is(Comp.Orange{})) {
+            try component.set(Comp.Orange, .{.ripe = true});
         }
 
-        for(apples) |component| {
-            //std.log.info("Apple grown", .{});
-            try entity.set(component, Components.Apple, .{.ripe = true});
+        if(component.is(Comp.Apple{})) {
+            try component.set(Comp.Apple, .{.ripe = true});
         }
     }
+    std.log.info("Fruits grown: {}", .{i});
 }
 
 pub fn Harvest(world: *World) void {
-    var i: usize = 0;
-    var entities = world.entities.getAll();
-    defer allocator.free(entities);
-
-    for(entities) |entity| {
+    var it = world.components.iterator();
+    var i: u32 = 0;
+    while(it.next()) |component| {
         //async schedule in fiber
         //yield
-        var oranges = entity.getComponents(Components.Orange{});
-        var apples = entity.getComponents(Components.Apple{});
-        defer allocator.free(oranges);
-        defer allocator.free(apples);
 
-        for(oranges) |component| {
-            if(Cast(Components.Orange).get(component).?.ripe == true) {
-                //std.log.info("Orange harvested", .{});
-                try entity.set(component, Components.Orange, .{.harvested = true});
+        if(component.is(Comp.Orange{})) {
+            if(Cast(Comp.Orange).get(component).?.ripe == true) {
+                try component.set(Comp.Orange, .{.harvested = true});
                 i += 1;
             }
         }
-        for(apples) |component| {
-            if(Cast(Components.Apple).get(component).?.ripe == true) {
-                //std.log.info("Apple harvested", .{});
-                try entity.set(component, Components.Apple, .{.harvested = true});
+        if(component.is(Comp.Apple{})) {
+            if(Cast(Comp.Apple).get(component).?.ripe == true) {
+                try component.set(Comp.Apple, .{.harvested = true});
                 i += 1;
             }
         }
     }
-    std.log.info("Harvested {} fruits.", .{i});
+    std.log.info("Fruits harvested: {}", .{i});
 }
 
 const World = struct {
@@ -309,6 +280,35 @@ const Component = struct {
     attached: bool,
     typeId: ?u32 = undefined,
     allocated: bool = false,
+
+    pub fn is(self: *const Component, comp_type: anytype) bool {
+        if(self.typeId == typeToId(comp_type)) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+    pub fn set(component: *const Component, comp_type: anytype, members: anytype) !void {
+        var idx: u32 = 0;
+        inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
+            const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
+            if (decl.is_pub and comptime comp_eql) {
+                inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
+                    if(idx == component.typeId.?) {
+                        var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data));
+                        inline for (std.meta.fields(@TypeOf(members))) |sets| {
+                            @field(field_ptr, sets.name) = @field(members, sets.name);
+                        }
+                        _ = member;
+                        return;
+                    }
+                    idx += 1;
+                }
+            }
+        }
+        return;
+    }
 
     pub fn destroy(self: *Component, comp_type: anytype) void {
         //std.log.info("Destroy component type: {s}", .{@typeName(comp_type)});
@@ -484,7 +484,7 @@ pub inline fn componentCount() usize {
 
 pub fn Cast(comptime T: type) type {
     return struct {
-        pub fn get(component: *Component) ?*T {
+        pub fn get(component: *const Component) ?*T {
             var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.data));
             return field_ptr;
         }

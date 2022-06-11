@@ -21,7 +21,7 @@ pub const _Components = struct {
         index: usize = 0,
         alive: u32 = 0,
 
-        pub fn next(it: *Iterator) ?*Component {
+        pub inline fn next(it: *Iterator) ?*Component {
             if (it.ctx.alive == 0) return null;
 
             const end = it.alive;
@@ -48,7 +48,7 @@ pub const _Components = struct {
         filter_type: u32,
         alive: u32 = 0,
 
-        pub fn next(it: *MaskedIterator) ?*Component {
+        pub inline fn next(it: *MaskedIterator) ?*Component {
             if (it.ctx.alive == 0) return null;
 
             var world = @ptrCast(*World, @alignCast(@alignOf(World), it.ctx.world));
@@ -271,11 +271,6 @@ const Entity = struct {
         world.entities.alive -= 1;
     }
 
-    pub fn get(self: *Entity, comptime T: type) type {
-        _ = self;
-        _ = T;
-    }
-
     pub inline fn iterator(self: *const Entities) Entities.Iterator {
         return .{ .ctx = self, .alive = self.alive };
     }
@@ -364,7 +359,7 @@ pub inline fn componentCount() usize {
 
 pub inline fn Cast(comptime T: type) type {
     return struct {
-        pub fn get(component: *Component) ?*T {
+        pub inline fn get(component: *Component) ?*T {
             var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.data));
             return field_ptr;
         }
@@ -387,7 +382,7 @@ const Entities = struct {
         index: usize = 0,
         alive: u32 = 0,
 
-        pub fn next(it: *Iterator) ?*Entity {
+        pub inline fn next(it: *Iterator) ?*Entity {
             if (it.ctx.alive == 0) return null;
 
             const end = it.alive;

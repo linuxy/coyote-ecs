@@ -1,7 +1,7 @@
 # coyote-ecs
 A fast and simple zig native ECS.
 
-Simply define some components in a container
+Define your components in a container
 ```Zig
 const std = @import("std");
 const ecs = @import("coyote-ecs");

@@ -11,7 +11,7 @@ const Cast = ecs.Cast;
 const Systems = ecs.Systems;
 
 //Components, must have default values
-//Name configured in ECS constants
+//Container name is configured in ECS constants
 pub const Components = struct {
     pub const Apple = struct {
         color: u32 = 0,

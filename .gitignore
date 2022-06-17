@@ -7,3 +7,5 @@ Cargo.lock
 *.o
 *.so
 *.a
+perf.data
+

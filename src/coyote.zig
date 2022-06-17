@@ -2,16 +2,17 @@ const std = @import("std");
 
 var allocator = std.heap.c_allocator;
 
-const MAX_ENTITIES = 96000; //Maximum number of entities alive at once
-const MAX_COMPONENTS = 48000; //Maximum number of components alive at once
+const MAX_ENTITIES = 100000; //Maximum number of entities alive at once
+const MAX_COMPONENTS = 100000; //Maximum number of components alive at once
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
+const MAX_COMPONENTS_BY_TYPE = MAX_COMPONENTS / componentCount(); //Maximum number of components of a given type alive at once
 
 pub const _Components = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     len: u32,
     alive: u32,
-    sparse: [MAX_ENTITIES]*Component,
-    sparse_data: [MAX_ENTITIES]Component,
+    sparse: [MAX_COMPONENTS]*Component,
+    sparse_data: [MAX_COMPONENTS]Component,
     free_idx: u32 = 0,
     resized: u32 = 0,
     created: u32 = 0,
@@ -151,7 +152,7 @@ pub const World = struct {
                                       };
         var i: usize = 0;
         while(i < componentCount()) {
-            world.entities.component_mask[i] = std.StaticBitSet(MAX_COMPONENTS).initEmpty();
+            world.entities.component_mask[i] = std.StaticBitSet(MAX_COMPONENTS_BY_TYPE).initEmpty();
             i += 1;
         }
         return world;
@@ -364,7 +365,7 @@ const Entities = struct {
     resized: u32 = 0,
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     created: u32 = 0,
-    component_mask: [componentCount()]std.StaticBitSet(MAX_COMPONENTS),
+    component_mask: [componentCount()]std.StaticBitSet(MAX_COMPONENTS_BY_TYPE),
 
     pub const Iterator = struct {
         ctx: *const Entities,

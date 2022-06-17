@@ -50,10 +50,20 @@ pub fn main() !void {
     //Filter components by type
     var it = world.components.iteratorFilter(Components.Orange{});
     i = 0;
-    while(it.next()) |component| : (i += 1) {
-        _ = component;
+    while(it.next()) |_| : (i += 1) {
+        //...
     }
+
     std.log.info("Orange components: {}", .{i});
+
+    //Filter entities by type
+    var it2 = world.entities.iteratorFilter(Components.Apple{});
+    i = 0;
+    while(it2.next()) |_| : (i += 1) {
+        //...
+    }
+
+    std.log.info("Apple entities: {}", .{i});
 
     Systems.run(Grow, .{world});
     Systems.run(Harvest, .{world});

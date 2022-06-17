@@ -271,17 +271,6 @@ const Entity = struct {
         world.entities.alive -= 1;
     }
 
-    pub inline fn iterator(self: *const Entities) Entities.Iterator {
-        return .{ .ctx = self, .alive = self.alive };
-    }
-
-    pub inline fn filteredIterator(self: *Entity, comp_type: anytype) _Components.MaskedIterator {
-        //get an iterator for components attached to this entity
-        return .{ .ctx = self,
-                  .filter_type = typeToId(comp_type),
-                  .alive = self.alive };
-    }
-
     pub inline fn set(self: *Entity, component: *Component, comp_type: anytype, members: anytype) !void {
         var idx: u32 = 0;
         inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
@@ -403,6 +392,35 @@ const Entities = struct {
         }
     };
 
+    pub const MaskedIterator = struct {
+        ctx: *const Entities,
+        index: usize = 0,
+        filter_type: u32,
+        alive: u32 = 0,
+
+        pub inline fn next(it: *MaskedIterator) ?*Entity {
+            if (it.ctx.alive == 0) return null;
+
+            var world = @ptrCast(*World, @alignCast(@alignOf(World), it.ctx.world));
+            //TODO: Count unique types
+            const end = it.ctx.alive;
+            var metadata = it.index;
+
+            while (metadata < end) : ({
+                metadata += 1;
+                it.index += 1;
+            }) {
+                if (world.entities.component_mask[it.filter_type].isSet(it.index)) {
+                    var sparse_index = it.index;
+                    it.index += 1;
+                    return it.ctx.sparse[sparse_index];
+                }
+            }
+
+            return null;
+        }
+    };
+
     pub inline fn create(ctx: *Entities) !*Entity {
         //most ECS cheat here and don't allocate memory until a component is assigned
 
@@ -444,6 +462,13 @@ const Entities = struct {
 
     pub inline fn iterator(self: *const Entities) Iterator {
         return .{ .ctx = self, .alive = self.alive };
+    }
+
+    pub inline fn iteratorFilter(self: *Entities, comp_type: anytype) MaskedIterator {
+        //get an iterator for entities attached to this entity
+        return .{ .ctx = self,
+                  .filter_type = typeToId(comp_type),
+                  .alive = self.alive };
     }
 
     pub inline fn count(ctx: *Entities) u32 {

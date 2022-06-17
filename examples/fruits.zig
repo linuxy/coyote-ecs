@@ -47,7 +47,7 @@ pub fn main() !void {
         try anEntity.attach(anOrangeComponent, Components.Orange{.color = 1, .ripe = false, .harvested = false});
     }
 
-    //Filter entities by component
+    //Filter components by type
     var it = world.components.iteratorFilter(Components.Orange{});
     i = 0;
     while(it.next()) |component| : (i += 1) {

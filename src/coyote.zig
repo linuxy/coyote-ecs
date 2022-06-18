@@ -365,7 +365,7 @@ const Entities = struct {
     resized: u32 = 0,
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     created: u32 = 0,
-    component_mask: [componentCount()]std.StaticBitSet(MAX_COMPONENTS),
+    component_mask: [componentCount()]std.StaticBitSet(MAX_COMPONENTS_BY_TYPE),
 
     pub const Iterator = struct {
         ctx: *const Entities,

@@ -338,7 +338,6 @@ pub inline fn componentCount() usize {
             inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
                 if(@typeInfo(@TypeOf(member)) == .Struct) {
                     idx += 1;
-                    _ = member;
                 }
             }
         }

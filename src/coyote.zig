@@ -227,7 +227,7 @@ const Component = struct {
     }
 };
 
-const Entity = struct {
+pub const Entity = struct {
     id: u32,
     alive: bool,
     world: ?*anyopaque,
@@ -479,6 +479,7 @@ const Entities = struct {
 
 pub const Systems = struct {
     pub fn run(comptime f: anytype, args: anytype) void {
-        @call(.{}, f, args);
+        const ret = @call(.{}, f, args);
+        if (@typeInfo(@TypeOf(ret)) == .ErrorUnion) try ret;
     }
 };

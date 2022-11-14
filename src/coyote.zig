@@ -2,6 +2,7 @@ const std = @import("std");
 
 var allocator = std.heap.c_allocator;
 
+//If zig_probe_stack segfaults this is too high, use heap if needed.
 const MAX_ENTITIES = 100000; //Maximum number of entities alive at once
 const MAX_COMPONENTS = 100000; //Maximum number of components alive at once
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
@@ -72,7 +73,8 @@ pub const _Components = struct {
         }
     };
 
-    pub inline fn create(ctx: *_Components, comp_type: anytype) !*Component {
+    //don't inline to avoid branch quota issues
+    pub fn create(ctx: *_Components, comp_type: anytype) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         if(ctx.alive >= MAX_COMPONENTS)
@@ -241,7 +243,8 @@ pub const Entity = struct {
         }
     }
 
-    pub inline fn attach(self: *Entity, component: *Component, comp_type: anytype) !void {
+    //inlining this causes compiler issues
+    pub fn attach(self: *Entity, component: *Component, comp_type: anytype) !void {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), component.world));
 
         if(@sizeOf(@TypeOf(comp_type)) > 0) {
@@ -331,6 +334,7 @@ pub inline fn idEqualsType(id: u32, t: anytype) bool {
 }
 
 pub inline fn componentCount() usize {
+    @setEvalBranchQuota(MAX_COMPONENTS * 2);
     var idx: u32 = 0;
     inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
         const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);

@@ -17,6 +17,7 @@ pub const _Components = struct {
     free_idx: u32 = 0,
     resized: u32 = 0,
     created: u32 = 0,
+    entity_mask: [componentCount()]std.StaticBitSet(MAX_ENTITIES), //Owns at least one component of type
 
     pub const Iterator = struct {
         ctx: *const _Components,
@@ -151,10 +152,12 @@ pub const World = struct {
                                       .world = world,
                                       .len = 0,
                                       .alive = 0,
+                                      .entity_mask = undefined,
                                       };
         var i: usize = 0;
         while(i < componentCount()) {
             world.entities.component_mask[i] = std.StaticBitSet(MAX_COMPONENTS_BY_TYPE).initEmpty();
+            world.components.entity_mask[i] = std.StaticBitSet(MAX_ENTITIES).initEmpty();
             i += 1;
         }
         return world;
@@ -234,6 +237,60 @@ pub const Entity = struct {
     alive: bool,
     world: ?*anyopaque,
     allocated: bool = false,
+    
+    pub const ComponentMaskedIterator = struct {
+        ctx: *const _Components,
+        entity: *const Entity,
+
+        index: usize = 0,
+        filter_type: u32,
+        alive: u32 = 0,
+
+        pub inline fn next(it: *ComponentMaskedIterator) ?*Component {
+            if (it.ctx.alive == 0) return null;
+
+            //var world = @ptrCast(*World, @alignCast(@alignOf(World), it.ctx.world));
+            //TODO: Count unique types
+            const end = it.ctx.alive;
+            var metadata = it.index;
+
+            while (metadata < end) : ({
+                metadata += 1;
+                it.index += 1;
+            }) {
+                if (it.ctx.sparse[it.index].owner == it.entity.id and it.ctx.sparse[it.index].typeId == it.filter_type) {
+                    var sparse_index = it.index;
+                    it.index += 1;
+                    return it.ctx.sparse[sparse_index];
+                }
+            }
+
+            return null;
+        }
+    };
+
+    pub inline fn iteratorFilter(self: *const Entity, comp_type: anytype) Entity.ComponentMaskedIterator {
+        //get an iterator for components attached to this entity
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
+        var ctx = &world.components;
+
+        return .{ .ctx = ctx,
+                  .entity = self,
+                  .filter_type = typeToId(comp_type),
+                  .alive = ctx.alive };
+    }
+
+    //TODO: This will only get one component
+    pub inline fn getByComponent(self: *Entity, comp_type: anytype) ?*Component {
+        @setEvalBranchQuota(MAX_ENTITIES);
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
+        if (world.components.entity_mask[typeToId(comp_type)].isSet(self.id)) { //Yes it owns one, search for it
+            var it = iteratorFilter(self, comp_type);
+            return it.next().?;
+        } else {
+            return null;
+        }
+    }
 
     pub inline fn remove(self: *Entity) void {
         if(self.alive == true) {
@@ -262,6 +319,7 @@ pub const Entity = struct {
         component.allocated = true;
         
         world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
+        world.components.entity_mask[@intCast(usize, component.typeId.?)].setValue(self.id, true);
     }
 
     pub inline fn detach(self: *Entity, component: *Component) !void {
@@ -301,6 +359,7 @@ pub const Entity = struct {
 };
 
 pub inline fn typeToId(t: anytype) u32 {
+    @setEvalBranchQuota(MAX_COMPONENTS * 2);
     var idx: u32 = 0;
     inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
         const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
@@ -419,7 +478,7 @@ const Entities = struct {
                 if (world.entities.component_mask[it.filter_type].isSet(it.index)) {
                     var sparse_index = it.index;
                     it.index += 1;
-                    return it.ctx.sparse[sparse_index];
+                    return it.ctx.sparse[sparse_index - 1];
                 }
             }
 

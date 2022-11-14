@@ -65,9 +65,9 @@ pub fn main() !void {
 
     std.log.info("Apple entities: {}", .{i});
 
-    Systems.run(Grow, .{world});
-    Systems.run(Harvest, .{world});
-    Systems.run(Raze, .{world});
+    try Systems.run(Grow, .{world});
+    try Systems.run(Harvest, .{world});
+    try Systems.run(Raze, .{world});
 
     std.log.info("Entities: {}", .{world.entities.count()});
     std.log.info("Components: {}", .{world.components.count()});

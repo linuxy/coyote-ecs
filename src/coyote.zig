@@ -251,7 +251,9 @@ pub const Entity = struct {
             var ref = @TypeOf(comp_type){};
             ref = comp_type;
 
-            var oref = @ptrCast(?*anyopaque, &ref);
+            var data = try allocator.create(@TypeOf(comp_type));
+            data.* = comp_type;
+            var oref = @ptrCast(?*anyopaque, data);
             component.data = oref;
         }
         component.attached = true;
@@ -482,7 +484,7 @@ const Entities = struct {
 };
 
 pub const Systems = struct {
-    pub fn run(comptime f: anytype, args: anytype) void {
+    pub fn run(comptime f: anytype, args: anytype) !void {
         const ret = @call(.{}, f, args);
         if (@typeInfo(@TypeOf(ret)) == .ErrorUnion) try ret;
     }

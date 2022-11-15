@@ -1,5 +1,4 @@
 const std = @import("std");
-const Arena = @import("./mimalloc_arena.zig").Arena;
 
 //If zig_probe_stack segfaults this is too high, use heap if needed.
 //TODO: Use heap past 10k-20k components

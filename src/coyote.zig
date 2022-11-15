@@ -3,8 +3,8 @@ const Arena = @import("./mimalloc_arena.zig").Arena;
 
 //If zig_probe_stack segfaults this is too high, use heap if needed.
 //TODO: Use heap past 10k-20k components
-const MAX_ENTITIES = 50000; //Maximum number of entities alive at once
-const MAX_COMPONENTS = 50000; //Maximum number of components alive at once
+const MAX_ENTITIES = 5000; //Maximum number of entities alive at once
+const MAX_COMPONENTS = 5000; //Maximum number of components alive at once
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
 const MAX_COMPONENTS_BY_TYPE = MAX_COMPONENTS / componentCount(); //Maximum number of components of a given type alive at once
 
@@ -377,7 +377,8 @@ pub const Entity = struct {
     }
 };
 
-pub inline fn typeToId(T: anytype) u32 {
+//Do not inline
+pub fn typeToId(T: anytype) u32 {
     var longId = @intCast(u32, @ptrToInt(&struct { var x: u8 = 0; }.x));
 
     var found = false;
@@ -397,7 +398,7 @@ pub inline fn typeToId(T: anytype) u32 {
 }
 
 pub inline fn componentCount() usize {
-    @setEvalBranchQuota(MAX_COMPONENTS);
+    @setEvalBranchQuota(MAX_COMPONENTS * 2);
     var idx: u32 = 0;
     inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
         const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);

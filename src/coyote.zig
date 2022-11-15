@@ -144,14 +144,11 @@ pub const World = struct {
     components: _Components,
     systems: Systems,
     allocator: std.mem.Allocator,
-    arena: Arena,
 
     pub fn create() !*World {
-        var arena = try Arena.init();
-        var allocator = arena.allocator();
+        var allocator = std.heap.c_allocator;
         var world = allocator.create(World) catch unreachable;
         world.allocator = allocator;
-        world.arena = arena;
         world.entities = Entities{.sparse = undefined,
                                   .sparse_data = undefined,
                                   .world = world,
@@ -176,7 +173,6 @@ pub const World = struct {
     }
 
     pub fn deinit(self: *World) void {
-        self.arena.deinit();
         self.allocator.destroy(self);
     }
 };

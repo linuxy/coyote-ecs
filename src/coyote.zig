@@ -3,6 +3,7 @@ const Arena = @import("./mimalloc_arena.zig").Arena;
 
 //If zig_probe_stack segfaults this is too high, use heap if needed.
 //TODO: Use heap past 10k-20k components
+
 const MAX_ENTITIES = 5000; //Maximum number of entities alive at once
 const MAX_COMPONENTS = 5000; //Maximum number of components alive at once
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
@@ -75,7 +76,7 @@ pub const _Components = struct {
     };
 
     //don't inline to avoid branch quota issues
-    pub fn create(ctx: *_Components, comp_type: anytype) !*Component {
+    pub fn create(ctx: *_Components, comptime comp_type: type) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         if(ctx.alive >= MAX_COMPONENTS)
@@ -98,7 +99,7 @@ pub const _Components = struct {
 
         component.world = world;
         component.attached = false;
-        component.typeId = null;
+        component.typeId = typeToId(comp_type);
         component.id = ctx.free_idx;
         component.allocated = false;
         component.alive = true;
@@ -126,7 +127,7 @@ pub const _Components = struct {
         return .{ .ctx = self, .alive = self.alive };
     }
 
-    pub inline fn iteratorFilter(self: *const _Components, comp_type: anytype) _Components.MaskedIterator {
+    pub inline fn iteratorFilter(self: *const _Components, comptime comp_type: type) _Components.MaskedIterator {
         //get an iterator for components attached to this entity
         return .{ .ctx = self,
                   .filter_type = typeToId(comp_type),
@@ -233,7 +234,7 @@ const Component = struct {
 
         world.entities.component_mask[@intCast(usize, self.typeId.?)].setValue(self.id, false);
 
-        //TODO: Destroy data
+        //TODO: Destroy data? If allocated just hold to reuse.
         self.data = null;
         self.attached = false;
         self.owners = std.StaticBitSet(MAX_ENTITIES).initEmpty();
@@ -329,7 +330,6 @@ pub const Entity = struct {
             component.data = oref;
         }
         component.attached = true;
-        component.typeId = typeToId(comp_type);
         component.allocated = true;
         
         world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
@@ -337,8 +337,8 @@ pub const Entity = struct {
         component.owners.setValue(self.id, true);
 
         //Start the linked list of components
-        if(self.next_type_component[typeToId(comp_type)] == null)
-            self.next_type_component[typeToId(comp_type)] = component;
+        if(self.next_type_component[@intCast(usize, component.typeId.?)] == null)
+            self.next_type_component[@intCast(usize, component.typeId.?)] = component;
     }
 
     pub inline fn detach(self: *Entity, component: *Component) !void {
@@ -378,7 +378,7 @@ pub const Entity = struct {
 };
 
 //Do not inline
-pub fn typeToId(T: anytype) u32 {
+pub fn typeToId(comptime T: type) u32 {
     var longId = @intCast(u32, @ptrToInt(&struct { var x: u8 = 0; }.x));
 
     var found = false;

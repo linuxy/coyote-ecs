@@ -110,9 +110,9 @@ pub const _Components = struct {
         ctx.created += 1;
         ctx.alive += 1;
 
-//        if(typeToId(comp_type) > componentCount() - 1)
-//            return error.ComponentNotInContainer;
-_ = comp_type;
+        if(typeToId(comp_type) > componentCount() - 1)
+            return error.ComponentNotInContainer;
+
         return component;
     }
 
@@ -233,6 +233,7 @@ const Component = struct {
 
         world.entities.component_mask[@intCast(usize, self.typeId.?)].setValue(self.id, false);
 
+        //TODO: Destroy data
         self.data = null;
         self.attached = false;
         self.owners = std.StaticBitSet(MAX_ENTITIES).initEmpty();
@@ -264,21 +265,17 @@ pub const Entity = struct {
         pub inline fn next(it: *ComponentMaskedIterator) ?*Component {
             if (it.ctx.alive == 0) return null;
 
-            //var world = @ptrCast(*World, @alignCast(@alignOf(World), it.ctx.world));
             //TODO: Count unique types
             const end = it.ctx.alive;
             var metadata = it.index;
 
-            std.log.info("looking for comp type: {} owned by {}", .{it.filter_type, it.entity.id});
             while (metadata < end) : ({
                 metadata += 1;
                 it.index += 1;
             }) {
-                std.log.info("comp id: {} comp owner: {} == entity id: {}, comp type: {} == filter typeid: {}", .{it.ctx.sparse[it.index].id, it.ctx.sparse[it.index].owners.isSet(it.entity.id), it.entity.id, it.ctx.sparse[it.index].typeId.?, it.filter_type});
                 if (it.ctx.sparse[it.index].owners.isSet(it.entity.id) and it.ctx.sparse[it.index].typeId == it.filter_type) {
                     var sparse_index = it.index;
                     it.index += 1;
-                    //std.log.info("found: {}", .{it.ctx.sparse[sparse_index]});
                     return it.ctx.sparse[sparse_index];
                 }
             }
@@ -305,19 +302,6 @@ pub const Entity = struct {
         if (world.components.entity_mask[typeToId(comp_type)].isSet(self.id)) { //Yes it owns one, search for it
             var it = iteratorFilter(self, comp_type);
             return it.next().?;
-        } else {
-            return null;
-        }
-    }
-
-    //TODO: Fix/remove?
-    pub fn getOneComponent(self: *Entity, comp_type: anytype) ?*Component {
-        @setEvalBranchQuota(MAX_ENTITIES * 2);
-        var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
-        var type_id = typeToId(comp_type);
-
-        if (world.components.entity_mask[type_id].isSet(self.id)) {
-            return self.next_type_component[type_id];
         } else {
             return null;
         }
@@ -393,26 +377,7 @@ pub const Entity = struct {
     }
 };
 
-pub inline fn complexTypeToId(t: anytype) u32 {
-    @setEvalBranchQuota(MAX_COMPONENTS * 2);
-    var idx: u32 = 0;
-    inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
-        const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
-        if (decl.is_pub and comptime comp_eql) {
-            inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
-                const comp_idx = comptime std.mem.indexOf(u8, @typeName(@TypeOf(t)), member.name);
-                if(comp_idx != null) {
-                    break;
-                }
-                idx += 1;
-            }
-        }
-    }
-
-    return idx;
-}
-
-pub fn typeToId(T: anytype) u32 {
+pub inline fn typeToId(T: anytype) u32 {
     var longId = @intCast(u32, @ptrToInt(&struct { var x: u8 = 0; }.x));
 
     var found = false;
@@ -431,25 +396,8 @@ pub fn typeToId(T: anytype) u32 {
     return  @intCast(u32, i);
 }
 
-pub inline fn idEqualsType(id: u32, t: anytype) bool {
-    var idx: u32 = 0;
-    inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
-        const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
-        if (decl.is_pub and comptime comp_eql) {
-            inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
-                if(idx == id and std.mem.indexOf(u8, @typeName(t), member.name) != null) {
-                    return true;
-                }
-                idx += 1;
-            }
-        }
-    }
-
-    return false;
-}
-
 pub inline fn componentCount() usize {
-    @setEvalBranchQuota(MAX_COMPONENTS * 2);
+    @setEvalBranchQuota(MAX_COMPONENTS);
     var idx: u32 = 0;
     inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
         const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);

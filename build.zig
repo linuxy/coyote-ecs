@@ -9,6 +9,8 @@ pub fn build(b: *std.build.Builder) void {
     exe.setBuildMode(mode);
     exe.use_stage1 = true;
     exe.linkLibC();
+    exe.addLibraryPath("vendor/mimalloc");
+    exe.linkSystemLibrary("mimalloc");
     exe.addPackage(ecsPkg);
     exe.install();
 

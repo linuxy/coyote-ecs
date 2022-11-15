@@ -23,7 +23,7 @@ pub const Components = struct {
 
 pub fn main() !void {
     //Create a world
-    var world = World.create();
+    var world = try World.create();
     defer world.deinit();
     
     //Create an entity

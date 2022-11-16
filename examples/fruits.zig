@@ -95,13 +95,13 @@ pub fn Harvest(world: *World) void {
     var i: u32 = 0;
     while(it.next()) |component| {
         if(component.is(Components.Orange)) {
-            if(Cast(Components.Orange).get(component).?.ripe == true) {
+            if(Cast(Components.Orange).get(component).ripe == true) {
                 try component.set(Components.Orange, .{.harvested = true});
                 i += 1;
             }
         }
         if(component.is(Components.Apple)) {
-            if(Cast(Components.Apple).get(component).?.ripe == true) {
+            if(Cast(Components.Apple).get(component).ripe == true) {
                 try component.set(Components.Apple, .{.harvested = true});
                 i += 1;
             }

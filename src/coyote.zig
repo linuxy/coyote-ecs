@@ -306,8 +306,6 @@ pub const Entity = struct {
         
         world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
         world.components.entity_mask[@intCast(usize, component.typeId.?)].setValue(self.id, true);
-        //std.log.info("Set entity mask for {} type {}", .{self.id, component.typeId.?});
-        //std.log.info("Entity mask id {} is {}", .{self.id, world.components.entity_mask[@intCast(usize, component.typeId.?)].isSet(self.id)});
         component.owners.setValue(self.id, true);
 
         //Append to the linked list of components

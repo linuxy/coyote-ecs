@@ -103,6 +103,7 @@ pub const _Components = struct {
         component.allocated = false;
         component.alive = true;
         component.owners = std.StaticBitSet(MAX_ENTITIES).initEmpty();
+        component.type_node = .{.data = component};
 
         ctx.sparse[ctx.free_idx] = component;
 
@@ -126,7 +127,7 @@ pub const _Components = struct {
         return .{ .ctx = self, .alive = self.alive };
     }
 
-    pub inline fn iteratorFilter(self: *const _Components, comptime comp_type: type) _Components.MaskedIterator {
+    pub fn iteratorFilter(self: *const _Components, comptime comp_type: type) _Components.MaskedIterator {
         //get an iterator for components attached to this entity
         return .{ .ctx = self,
                   .filter_type = typeToId(comp_type),
@@ -185,7 +186,8 @@ const Component = struct {
     typeId: ?u32 = undefined,
     allocated: bool = false,
     alive: bool = false,
-    
+    type_node: std.TailQueue(*Component).Node,
+
     pub inline fn is(self: *const Component, comp_type: anytype) bool {
         if(self.typeId == typeToId(comp_type)) {
             return true;
@@ -217,17 +219,14 @@ const Component = struct {
 
     //Detaches from all entities
     pub inline fn detach(self: *Component) void {
-        var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
 
+        //TODO: Entities mask TBD
         self.attached = false;
-        world.entities.component_mask[@intCast(usize, self.typeId.?)].setValue(self.id, false);
         self.owners = std.StaticBitSet(MAX_ENTITIES).initEmpty();
     }
 
     pub inline fn destroy(self: *Component) void {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
-
-        world.entities.component_mask[@intCast(usize, self.typeId.?)].setValue(self.id, false);
 
         //TODO: Destroy data? If allocated just hold to reuse.
         self.data = null;
@@ -248,56 +247,34 @@ pub const Entity = struct {
     alive: bool,
     world: ?*anyopaque,
     allocated: bool = false,
-    next_type_component: [componentCount()]?*Component,
+    type_components: [componentCount()]std.TailQueue(*Component),
 
     pub const ComponentMaskedIterator = struct {
-        ctx: *const _Components,
-        entity: *const Entity,
+        ctx: *const Entity,
 
-        index: usize = 0,
         filter_type: u32,
-        alive: u32 = 0,
+        index: ?*std.TailQueue(*Component).Node = null,
 
         pub inline fn next(it: *ComponentMaskedIterator) ?*Component {
-            if (it.ctx.alive == 0) return null;
-
-            //TODO: Count unique types
-            const end = it.ctx.alive;
-            var metadata = it.index;
-
-            while (metadata < end) : ({
-                metadata += 1;
-                it.index += 1;
-            }) {
-                if (it.ctx.sparse[it.index].owners.isSet(it.entity.id) and it.ctx.sparse[it.index].typeId == it.filter_type) {
-                    var sparse_index = it.index;
-                    it.index += 1;
-                    return it.ctx.sparse[sparse_index];
-                }
+            while (it.index) |node| : (it.index = node.next) {
+                it.index = node.next;
+                return node.data;
             }
-
             return null;
         }
     };
 
-    pub inline fn iteratorFilter(self: *const Entity, comp_type: anytype) Entity.ComponentMaskedIterator {
+    pub fn iteratorFilter(self: *const Entity, comptime comp_type: type) Entity.ComponentMaskedIterator {
         //get an iterator for components attached to this entity
-        var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
-        var ctx = &world.components;
 
-        return .{ .ctx = ctx,
-                  .entity = self,
-                  .filter_type = typeToId(comp_type),
-                  .alive = ctx.alive };
+        return .{ .ctx = self,
+                  .filter_type = typeToId(comp_type), 
+                  .index = self.type_components[typeToId(comp_type)].first};
     }
 
-    //TODO: This will only get one component
-    pub inline fn getByComponent(self: *Entity, comp_type: anytype) ?*Component {
-        @setEvalBranchQuota(MAX_ENTITIES * 2);
-        var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
-        if (world.components.entity_mask[typeToId(comp_type)].isSet(self.id)) { //Yes it owns one, search for it
-            var it = iteratorFilter(self, comp_type);
-            return it.next().?;
+    pub inline fn getOneComponent(self: *Entity, comptime comp_type: type) ?*Component {
+        if(self.type_components[typeToId(comp_type)].first != null) {
+            return self.type_components[typeToId(comp_type)].first.?.data;
         } else {
             return null;
         }
@@ -329,11 +306,12 @@ pub const Entity = struct {
         
         world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
         world.components.entity_mask[@intCast(usize, component.typeId.?)].setValue(self.id, true);
+        //std.log.info("Set entity mask for {} type {}", .{self.id, component.typeId.?});
+        //std.log.info("Entity mask id {} is {}", .{self.id, world.components.entity_mask[@intCast(usize, component.typeId.?)].isSet(self.id)});
         component.owners.setValue(self.id, true);
 
-        //Start the linked list of components
-        if(self.next_type_component[@intCast(usize, component.typeId.?)] == null)
-            self.next_type_component[@intCast(usize, component.typeId.?)] = component;
+        //Append to the linked list of components
+        self.type_components[@intCast(usize, component.typeId.?)].append(&component.type_node);
     }
 
     pub inline fn detach(self: *Entity, component: *Component) !void {
@@ -411,8 +389,8 @@ pub inline fn componentCount() usize {
 
 pub inline fn Cast(comptime T: type) type {
     return struct {
-        pub inline fn get(component: *Component) ?*T {
-            var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.data));
+        pub inline fn get(component: ?*Component) *T {
+            var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.?.data));
             return field_ptr;
         }
     };
@@ -462,22 +440,18 @@ const Entities = struct {
         filter_type: u32,
         alive: u32 = 0,
 
-        pub inline fn next(it: *MaskedIterator) ?*Entity {
+        pub fn next(it: *MaskedIterator) ?*Entity {
             if (it.ctx.alive == 0) return null;
 
             var world = @ptrCast(*World, @alignCast(@alignOf(World), it.ctx.world));
             //TODO: Count unique types
             const end = it.ctx.alive;
-            var metadata = it.index;
 
-            while (metadata < end) : ({
-                metadata += 1;
-                it.index += 1;
-            }) {
-                if (world.entities.component_mask[it.filter_type].isSet(it.index)) {
+            while (it.index < end) : (it.index += 1) {
+                if (world.components.entity_mask[it.filter_type].isSet(it.index)) {
                     var sparse_index = it.index;
                     it.index += 1;
-                    return it.ctx.sparse[sparse_index - 1];
+                    return it.ctx.sparse[sparse_index];
                 }
             }
 
@@ -506,6 +480,12 @@ const Entities = struct {
         entity.alive = true;
         entity.world = ctx.world;
 
+        var i: usize = 0;
+        while(i < componentCount()) : (i += 1) {
+            var queue = std.TailQueue(*Component){};
+            entity.type_components[i] = queue;
+        }
+
         ctx.sparse[ctx.free_idx] = entity;
         ctx.alive += 1;
         ctx.free_idx += 1;
@@ -528,7 +508,7 @@ const Entities = struct {
         return .{ .ctx = self, .alive = self.alive };
     }
 
-    pub inline fn iteratorFilter(self: *Entities, comp_type: anytype) MaskedIterator {
+    pub fn iteratorFilter(self: *Entities, comptime comp_type: type) MaskedIterator {
         //get an iterator for entities attached to this entity
         return .{ .ctx = self,
                   .filter_type = typeToId(comp_type),

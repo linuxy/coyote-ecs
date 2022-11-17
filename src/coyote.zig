@@ -357,13 +357,9 @@ pub inline fn componentCount() usize {
     return idx;
 }
 
-pub inline fn Cast(comptime T: type) type {
-    return struct {
-        pub inline fn get(component: ?*Component) *T {
-            var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.?.data));
-            return field_ptr;
-        }
-    };
+pub inline fn Cast(comptime T: type, component: ?*Component) *T {
+        var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.?.data));
+        return field_ptr;
 }
 
 const Entities = struct {

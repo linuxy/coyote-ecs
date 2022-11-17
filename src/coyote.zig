@@ -197,24 +197,10 @@ const Component = struct {
     }
 
     pub inline fn set(component: *Component, comptime comp_type: type, members: anytype) !void {
-        var idx: u32 = 0;
-        inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
-            const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
-            if (decl.is_pub and comptime comp_eql) {
-                inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
-                    if(idx == component.typeId.?) {
-                        var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data));
-                        inline for (std.meta.fields(@TypeOf(members))) |sets| {
-                            @field(field_ptr, sets.name) = @field(members, sets.name);
-                        }
-                        _ = member;
-                        return;
-                    }
-                    idx += 1;
-                }
-            }
+        var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data));
+        inline for (std.meta.fields(@TypeOf(members))) |sets| {
+            @field(field_ptr, sets.name) = @field(members, sets.name);
         }
-        return;
     }
 
     //Detaches from all entities
@@ -325,26 +311,12 @@ pub const Entity = struct {
         world.entities.alive -= 1;
     }
 
-    pub inline fn set(self: *Entity, component: *Component, comp_type: anytype, members: anytype) !void {
-        var idx: u32 = 0;
-        inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
-            const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
-            if (decl.is_pub and comptime comp_eql) {
-                inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
-                    if(idx == component.typeId.?) {
-                        var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data));
-                        inline for (std.meta.fields(@TypeOf(members))) |sets| {
-                            @field(field_ptr, sets.name) = @field(members, sets.name);
-                        }
-                        _ = member;
-                        return;
-                    }
-                    idx += 1;
-                }
-            }
+    pub inline fn set(self: *Entity, component: *Component, comptime comp_type: type, members: anytype) !void {
+        var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data));
+        inline for (std.meta.fields(@TypeOf(members))) |sets| {
+            @field(field_ptr, sets.name) = @field(members, sets.name);
         }
         _ = self;
-        return;
     }
 };
 

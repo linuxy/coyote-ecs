@@ -3,6 +3,9 @@ A fast and simple zig native ECS.
 
 Builds against zig 0.11.0+
 
+A more complete example:
+[coyote-snake](https://github.com/linuxy/coyote-snake)
+
 Define your components in a container
 ```Zig
 const std = @import("std");

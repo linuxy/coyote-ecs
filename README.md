@@ -3,6 +3,10 @@ A fast and simple zig native ECS.
 
 Builds against zig 0.11.0+
 
+To build:
+zig build mimalloc
+zig build
+
 Define your components in a container
 ```Zig
 const std = @import("std");

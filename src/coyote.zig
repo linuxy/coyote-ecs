@@ -263,6 +263,13 @@ pub const Entity = struct {
                   .index = self.type_components[typeToId(comp_type)].first};
     }
 
+    pub inline fn addComponent(self: *Entity, comptime comp_type: type, comp_val: anytype) !*Component {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
+        var component = try world.components.create(comp_type);
+        try self.attach(component, comp_val);
+        return component;
+    }
+
     pub inline fn getOneComponent(self: *Entity, comptime comp_type: type) ?*Component {
         if(self.type_components[typeToId(comp_type)].first != null) {
             return self.type_components[typeToId(comp_type)].first.?.data;

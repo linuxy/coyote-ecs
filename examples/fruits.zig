@@ -18,6 +18,12 @@ pub const Components = struct {
         ripe: bool = false,
         harvested: bool = false,
     };
+
+    pub const Pear = struct {
+        color: u32 = 0,
+        ripe: bool = false,
+        harvested: bool = false,
+    };
 };
 
 pub fn main() !void {
@@ -28,6 +34,8 @@ pub fn main() !void {
     //Create an entity
     var anOrange = try world.entities.create();
     var anApple = try world.entities.create();
+    var aPear = try world.entities.create();
+
     std.log.info("Created an Orange ID: {}", .{anOrange.id});
 
     //Create a unique component
@@ -37,6 +45,7 @@ pub fn main() !void {
     //Attach and assign a component. Do not use an anonymous struct.
     try anOrange.attach(orangeComponent, Components.Orange{.color = 0, .ripe = false, .harvested = false});
     try anApple.attach(appleComponent, Components.Apple{.color = 0, .ripe = false, .harvested = false});
+    _ = try aPear.addComponent(Components.Pear, Components.Pear{.color = 1, .ripe = false, .harvested = false});
 
     //Create 1k entities and attach 1k unique components
     var i: usize = 0;
@@ -64,6 +73,11 @@ pub fn main() !void {
 
     std.log.info("Apple entities: {}", .{i});
 
+    if(aPear.getOneComponent(Components.Pear) != null)
+        std.log.info("Pear entities: >= 1", .{})
+    else
+        std.log.info("Pear entities: 0", .{});
+
     try Systems.run(Grow, .{world});
     try Systems.run(Harvest, .{world});
     try Systems.run(Raze, .{world});
@@ -84,6 +98,9 @@ pub fn Grow(world: *World) void {
             try component.set(Components.Apple, .{.ripe = true});
         }
 
+        if(component.is(Components.Pear)) {
+            try component.set(Components.Pear, .{.ripe = true});
+        }
         //Fruits fall from the tree
         component.detach();
     }
@@ -103,6 +120,12 @@ pub fn Harvest(world: *World) void {
         if(component.is(Components.Apple)) {
             if(Cast(Components.Apple, component).ripe == true) {
                 try component.set(Components.Apple, .{.harvested = true});
+                i += 1;
+            }
+        }
+        if(component.is(Components.Pear)) {
+            if(Cast(Components.Pear, component).ripe == true) {
+                try component.set(Components.Pear, .{.harvested = true});
                 i += 1;
             }
         }

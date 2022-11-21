@@ -7,6 +7,9 @@ To build:
 zig build mimalloc
 zig build
 
+A more complete example:
+[coyote-snake](https://github.com/linuxy/coyote-snake)
+
 Define your components in a container
 ```Zig
 const std = @import("std");

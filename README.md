@@ -4,8 +4,8 @@ A fast and simple zig native ECS.
 Builds against zig 0.11.0+
 
 To build:
-zig build mimalloc
-zig build
+* zig build mimalloc
+* zig build
 
 A more complete example:
 [coyote-snake](https://github.com/linuxy/coyote-snake)

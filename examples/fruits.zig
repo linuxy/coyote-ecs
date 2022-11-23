@@ -45,11 +45,10 @@ pub fn main() !void {
     //Attach and assign a component. Do not use an anonymous struct.
     try anOrange.attach(orangeComponent, Components.Orange{.color = 0, .ripe = false, .harvested = false});
     try anApple.attach(appleComponent, Components.Apple{.color = 0, .ripe = false, .harvested = false});
-    _ = try aPear.addComponent(Components.Pear, Components.Pear{.color = 1, .ripe = false, .harvested = false});
 
     //Create 1k entities and attach 1k unique components
     var i: usize = 0;
-    while(i < 1000) : (i += 1) {
+    while(i < 3000) : (i += 1) {
         var anEntity = try world.entities.create();
         var anOrangeComponent = try world.components.create(Components.Orange);
         try anEntity.attach(anOrangeComponent, Components.Orange{.color = 1, .ripe = false, .harvested = false});
@@ -73,10 +72,12 @@ pub fn main() !void {
 
     std.log.info("Apple entities: {}", .{i});
 
-//    if(aPear.getOneComponent(Components.Pear) != null)
-//        std.log.info("Pear entities: >= 1", .{})
-//    else
-//        std.log.info("Pear entities: 0", .{});
+    _ = try aPear.addComponent(Components.Pear, Components.Pear{.color = 1, .ripe = false, .harvested = false});
+
+    if(aPear.getOneComponent(Components.Pear) != null)
+        std.log.info("Pear entities: >= 1", .{})
+    else
+        std.log.info("Pear entities: 0", .{});
 
     try Systems.run(Grow, .{world});
     try Systems.run(Harvest, .{world});
@@ -109,7 +110,6 @@ pub fn Grow(world: *World) void {
 
 pub fn Harvest(world: *World) void {
     var it = world.components.iterator();
-    std.log.info("harvest it: {}", .{it});
     var i: u32 = 0;
     while(it.next()) |component| {
         if(component.is(Components.Orange)) {
@@ -130,7 +130,6 @@ pub fn Harvest(world: *World) void {
                 i += 1;
             }
         }
-        std.log.info("i: {}", .{i});
         component.destroy();
     }
     

@@ -46,9 +46,9 @@ pub fn main() !void {
     try anOrange.attach(orangeComponent, Components.Orange{.color = 0, .ripe = false, .harvested = false});
     try anApple.attach(appleComponent, Components.Apple{.color = 0, .ripe = false, .harvested = false});
 
-    //Create 1k entities and attach 1k unique components
+    //Create 50k entities and attach 50k unique components
     var i: usize = 0;
-    while(i < 3000) : (i += 1) {
+    while(i < 50000) : (i += 1) {
         var anEntity = try world.entities.create();
         var anOrangeComponent = try world.components.create(Components.Orange);
         try anEntity.attach(anOrangeComponent, Components.Orange{.color = 1, .ripe = false, .harvested = false});

@@ -1,44 +1,78 @@
 const std = @import("std");
 const Arena = @import("./mimalloc_arena.zig").Arena;
 
-//If zig_probe_stack segfaults this is too high, use heap if needed.
-//TODO: Use heap past 10k-20k components
-
-const MAX_ENTITIES = 5000; //Maximum number of entities alive at once
-const MAX_COMPONENTS = 5000; //Maximum number of components alive at once
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
-const MAX_COMPONENTS_BY_TYPE = MAX_COMPONENTS / componentCount(); //Maximum number of components of a given type alive at once
+const CHUNK_SIZE = 128; //Only operate on one chunk at a time
 
-pub const _Components = struct {
+//No chunk should know of another chunk
+//Modulo ID/CHUNK
+
+//SuperComponents map component chunks to current layout
+pub const SuperComponents = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
-    len: u32,
-    alive: u32,
-    sparse: [MAX_COMPONENTS]*Component,
-    sparse_data: [MAX_COMPONENTS]Component,
-    free_idx: u32 = 0,
-    resized: u32 = 0,
-    created: u32 = 0,
-    entity_mask: [componentCount()]std.StaticBitSet(MAX_ENTITIES), //Owns at least one component of type
+    alive: usize,
+
+    pub inline fn count(ctx: *SuperComponents) u32 {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        var i: usize = 0;
+        var total: u32 = 0;
+        while(i < world.components_len) : (i += 1) {
+            total += world._components[i].alive;
+        }
+        return total;
+    }
+
+    pub fn create(ctx: *SuperComponents, comptime comp_type: type) !*Component {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        defer ctx.alive += 1;
+
+        if(world._components[world.components_free_idx].len < CHUNK_SIZE) {
+            return try world._components[world.components_free_idx].create(comp_type);
+        } else {
+            try ctx.expand();
+            return try world._components[world.components_free_idx].create(comp_type);
+        }
+    }
+
+    pub fn expand(ctx: *SuperComponents) !void {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        var temp = try world.allocator.realloc(world._components, world.components_len + 1);
+        world._components = temp;
+        world._components[world.components_len].world = world;
+        world._components[world.components_len].len = 0;
+        world._components[world.components_len].alive = 0;
+        world._components[world.components_len].free_idx = 0;
+        world._components[world.components_len].sparse = try world.allocator.alloc(Component, CHUNK_SIZE);
+
+        var i: usize = 0;
+        while(i < componentCount()) : (i += 1) {
+            world._components[world.components_len].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
+        }
+
+        world.components_len += 1;
+        world.components_free_idx = world.components_len - 1;
+
+        components_idx = world.components_free_idx;
+    }
 
     pub const Iterator = struct {
-        ctx: *const _Components,
+        ctx: *[]_Components,
         index: usize = 0,
-        alive: u32 = 0,
+        alive: usize = 0,
+        world: *World,
 
         pub inline fn next(it: *Iterator) ?*Component {
-            if (it.ctx.alive == 0) return null;
 
-            const end = it.alive;
-            var metadata = it.index;
-
-            while (metadata < end) : ({
-                metadata += 1;
-                it.index += 1;
-            }) {
-                if (it.ctx.sparse[it.index].alive) {
-                    var sparse_index = it.index;
+            while (it.index < it.alive) : (it.index += 1) {
+                var mod = it.index / CHUNK_SIZE;
+                var rem = @rem(it.index, CHUNK_SIZE);
+                if (it.ctx.*[mod].sparse[rem].alive) {
+                    var sparse_index = rem;
                     it.index += 1;
-                    return it.ctx.sparse[sparse_index];
+                    return &it.ctx.*[mod].sparse[sparse_index];
                 }
             }
 
@@ -47,27 +81,22 @@ pub const _Components = struct {
     };
 
     pub const MaskedIterator = struct {
-        ctx: *const _Components,
+        ctx: *[]_Components,
         index: usize = 0,
         filter_type: u32,
-        alive: u32 = 0,
+        alive: usize = 0,
+        world: *World,
 
         pub inline fn next(it: *MaskedIterator) ?*Component {
-            if (it.ctx.alive == 0) return null;
-
-            var world = @ptrCast(*World, @alignCast(@alignOf(World), it.ctx.world));
             //TODO: Count unique types
-            const end = it.ctx.alive;
-            var metadata = it.index;
 
-            while (metadata < end) : ({
-                metadata += 1;
-                it.index += 1;
-            }) {
-                if (world.entities.component_mask[it.filter_type].isSet(it.index)) {
-                    var sparse_index = it.index;
+            while (it.index < it.alive) : (it.index += 1) {
+                var mod = it.index / CHUNK_SIZE;
+                var rem = @rem(it.index, CHUNK_SIZE);
+                if (it.world._components[mod].sparse[rem].typeId == it.filter_type) {
+                    var sparse_index = rem;
                     it.index += 1;
-                    return it.ctx.sparse[sparse_index];
+                    return &it.ctx.*[mod].sparse[sparse_index];
                 }
             }
 
@@ -75,27 +104,106 @@ pub const _Components = struct {
         }
     };
 
+    pub const MaskedEntityIterator = struct {
+        ctx: *[]_Components,
+        inner_index: usize = 0,
+        outer_index: usize = 0,
+        filter_type: u32,
+        entities_alive: usize = 0,
+        components_alive: usize = 0,
+        world: *World,
+        entity: *Entity,
+
+        pub inline fn next(it: *MaskedEntityIterator) ?*Component {
+            //TODO: Count unique types
+
+            //Scan all components in every chunk, find the first matching component type owned by the entity
+            while (it.outer_index < it.components_alive) : (it.outer_index += 1) {
+                var mod = it.outer_index / CHUNK_SIZE;
+                var rem = @rem(it.outer_index, CHUNK_SIZE);
+                if (it.world._components[mod].sparse[rem].owners.isSet(it.entity.id)) { //Found a component matching type, check all chunks for entities
+                    var inner: usize = 0;
+                    while(inner < it.world.entities_len) : (inner += 1) {
+                         if(it.world._entities[inner].component_mask[it.filter_type].isSet(it.world._components[mod].sparse[rem].id)) {
+                            var sparse_index = rem;
+                            it.outer_index += 1;
+                            return &it.ctx.*[mod].sparse[sparse_index];
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+    };
+
+    //TODO: By attached vs unattached
+    pub inline fn iterator(ctx: *SuperComponents) SuperComponents.Iterator {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+        var components = &world._components;
+        return .{ .ctx = components, .alive = ctx.alive, .world = world };
+    }
+
+    pub fn iteratorFilter(ctx: *SuperComponents, comptime comp_type: type) SuperComponents.MaskedIterator {
+        //get an iterator for components attached to this entity
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+        var components = &world._components;
+        return .{ .ctx = components,
+                  .filter_type = typeToId(comp_type),
+                  .alive = ctx.alive,
+                  .world = world };
+    }
+
+    pub fn iteratorFilterByEntity(ctx: *SuperComponents, entity: *Entity, comptime comp_type: type) SuperComponents.MaskedEntityIterator {
+        //get an iterator for components attached to this entity
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+        var components = &world._components;
+        return .{ .ctx = components,
+                  .filter_type = typeToId(comp_type),
+                  .components_alive = ctx.alive,
+                  .entities_alive = world.entities.alive,
+                  .world = world,
+                  .entity = entity };
+    }
+};
+
+pub const _Components = struct {
+    world: ?*anyopaque = undefined, //Defeats cyclical reference checking
+    len: u32,
+    alive: u32,
+    sparse: []Component,
+    free_idx: u32 = 0,
+    created: u32 = 0,
+    entity_mask: [componentCount()]std.StaticBitSet(CHUNK_SIZE), //Owns at least one component of type
+
+    pub inline fn count(ctx: *_Components) u32 {
+        //count of all living components
+
+        return ctx.alive;
+    }
+
     //don't inline to avoid branch quota issues
     pub fn create(ctx: *_Components, comptime comp_type: type) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
-        if(ctx.alive >= MAX_COMPONENTS)
+        if(ctx.alive > CHUNK_SIZE)
             return error.NoFreeComponentSlots;
 
         //find end of sparse array
         var wrapped = false;
-        while(ctx.sparse_data[ctx.free_idx].allocated == true) {
-            if(wrapped and ctx.free_idx > MAX_COMPONENTS)
+        while(ctx.sparse[ctx.free_idx].allocated == true) {
+            if(wrapped and ctx.free_idx > CHUNK_SIZE)
                 return error.NoFreeComponentSlots;
 
             ctx.free_idx = ctx.alive + 1;
-            if(ctx.free_idx > MAX_COMPONENTS - 1) {
+            if(ctx.free_idx > CHUNK_SIZE - 1) {
                 ctx.free_idx = 0;
                 wrapped = true;
             }
         }
-        
-        var component = &ctx.sparse_data[ctx.free_idx];
+        if(!wrapped)
+            ctx.len += 1;
+
+        var component = &ctx.sparse[ctx.free_idx];
 
         component.world = world;
         component.attached = false;
@@ -103,10 +211,9 @@ pub const _Components = struct {
         component.id = ctx.free_idx;
         component.allocated = false;
         component.alive = true;
-        component.owners = std.StaticBitSet(MAX_ENTITIES).initEmpty();
+        component.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
         component.type_node = .{.data = component};
-
-        ctx.sparse[ctx.free_idx] = component;
+        component.chunk = components_idx;
 
         ctx.free_idx += 1;
         ctx.created += 1;
@@ -117,32 +224,27 @@ pub const _Components = struct {
 
         return component;
     }
-
-    pub inline fn count(ctx: *_Components) u32 {
-        //count of all living components
-
-        return ctx.alive;
-    }
-
-    pub inline fn iterator(self: *const _Components) Iterator {
-        return .{ .ctx = self, .alive = self.alive };
-    }
-
-    pub fn iteratorFilter(self: *const _Components, comptime comp_type: type) _Components.MaskedIterator {
-        //get an iterator for components attached to this entity
-        return .{ .ctx = self,
-                  .filter_type = typeToId(comp_type),
-                  .alive = self.alive };
-    }
 };
 
+//Global
 var types: [componentCount()]u32 = undefined;
 var type_idx: usize = 0;
 
+//TLS
+var entities_idx: usize = 0;
+var components_idx: usize = 0;
+
 pub const World = struct {
     //Superset of Entities and Systems
-    entities: Entities,
-    components: _Components,
+    entities: SuperEntities,
+    components: SuperComponents,
+    _entities: []Entities,
+    _components: []_Components,
+    entities_len: usize = 0,
+    components_len: usize = 0,
+    components_free_idx: usize = 0,
+    entities_free_idx: usize = 0,
+
     systems: Systems,
     allocator: std.mem.Allocator,
     arena: Arena,
@@ -151,42 +253,58 @@ pub const World = struct {
         var arena = try Arena.init();
         var allocator = arena.allocator();
         var world = allocator.create(World) catch unreachable;
+
         world.allocator = allocator;
         world.arena = arena;
-        world.entities = Entities{.sparse = undefined,
-                                  .sparse_data = undefined,
-                                  .world = world,
-                                  .component_mask = undefined,
-                                 };
+        world.entities.world = world;
+        world.components.world = world;
+        
+        world.entities_len = 1;
+        world.components_len = 1;
+        world.entities_free_idx = 0;
+        world.components_free_idx = 0;
+        world.components.alive = 0;
+        world.entities.alive = 0;
+
+        world._entities = try allocator.alloc(Entities, 1);
+        world._entities[entities_idx].world = world;
+        world._entities[entities_idx].len = 0;
+        world._entities[entities_idx].alive = 0;
+        world._entities[entities_idx].free_idx = 0;
+        world._entities[entities_idx].sparse = try allocator.alloc(Entity, CHUNK_SIZE);
+
         world.systems = Systems{};
-        world.components = _Components{.sparse = undefined,
-                                       .sparse_data = undefined,
-                                       .world = world,
-                                       .len = 0,
-                                       .alive = 0,
-                                       .entity_mask = undefined,
-                                      };
+
+        world._components = try allocator.alloc(_Components, 1);
+        world._components[components_idx].world = world;
+        world._components[components_idx].len = 0;
+        world._components[components_idx].alive = 0;
+        world._components[components_idx].free_idx = 0;
+        world._components[components_idx].sparse = try allocator.alloc(Component, CHUNK_SIZE);
+
         var i: usize = 0;
         while(i < componentCount()) {
-            world.entities.component_mask[i] = std.StaticBitSet(MAX_COMPONENTS_BY_TYPE).initEmpty();
-            world.components.entity_mask[i] = std.StaticBitSet(MAX_ENTITIES).initEmpty();
+            world._entities[entities_idx].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
+            world._components[components_idx].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
             i += 1;
         }
 
         return world;
     }
 
-    pub fn deinit(self: *World) void {
+    pub fn destroy(self: *World) void {
         self.arena.deinit();
         self.allocator.destroy(self);
     }
+
 };
 
 const Component = struct {
+    chunk: usize,
     id: u32,
     data: ?*anyopaque,
     world: ?*anyopaque,
-    owners: std.StaticBitSet(MAX_ENTITIES),
+    owners: std.StaticBitSet(CHUNK_SIZE),
     attached: bool,
     typeId: ?u32 = undefined,
     allocated: bool = false,
@@ -213,7 +331,7 @@ const Component = struct {
 
         //TODO: Entities mask TBD
         self.attached = false;
-        self.owners = std.StaticBitSet(MAX_ENTITIES).initEmpty();
+        self.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
     }
 
     pub inline fn destroy(self: *Component) void {
@@ -222,68 +340,39 @@ const Component = struct {
         //TODO: Destroy data? If allocated just hold to reuse.
         self.data = null;
         self.attached = false;
-        self.owners = std.StaticBitSet(MAX_ENTITIES).initEmpty();
+        self.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
         self.typeId = null;
         self.allocated = false;
         self.alive = false;
         
+        world._components[self.chunk].alive -= 1;
+        world._components[self.chunk].free_idx = self.id;
+        world.components_free_idx = self.chunk;
         world.components.alive -= 1;
-        world.components.free_idx = self.id;
-
     }
 };
 
 pub const Entity = struct {
+    chunk: usize,
     id: u32,
     alive: bool,
     world: ?*anyopaque,
     allocated: bool = false,
     type_components: [componentCount()]std.TailQueue(*Component),
+    type_entities: [componentCount()]std.TailQueue(*Entity),
 
-    pub const ComponentMaskedIterator = struct {
-        ctx: *const Entity,
-
-        filter_type: u32,
-        index: ?*std.TailQueue(*Component).Node = null,
-
-        pub inline fn next(it: *ComponentMaskedIterator) ?*Component {
-            while (it.index) |node| : (it.index = node.next) {
-                it.index = node.next;
-                return node.data;
-            }
-            return null;
-        }
-    };
-
-    pub fn iteratorFilter(self: *const Entity, comptime comp_type: type) Entity.ComponentMaskedIterator {
-        //get an iterator for components attached to this entity
-
-        return .{ .ctx = self,
-                  .filter_type = typeToId(comp_type), 
-                  .index = self.type_components[typeToId(comp_type)].first};
-    }
-
-    pub inline fn addComponent(self: *Entity, comptime comp_type: type, comp_val: anytype) !*Component {
-        var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
+    pub inline fn addComponent(ctx: *Entity, comptime comp_type: type, comp_val: anytype) !*Component {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
         var component = try world.components.create(comp_type);
-        try self.attach(component, comp_val);
+        try ctx.attach(component, comp_val);
         return component;
     }
 
-    pub inline fn getOneComponent(self: *Entity, comptime comp_type: type) ?*Component {
-        if(self.type_components[typeToId(comp_type)].first != null) {
-            return self.type_components[typeToId(comp_type)].first.?.data;
-        } else {
-            return null;
-        }
-    }
-
-    pub inline fn remove(self: *Entity) void {
-        if(self.alive == true) {
-            self.alive = false;
-            self.world.entities.alive -= 1;
-            self.world.entities.free_idx = self.id;
-        }
+    pub inline fn getOneComponent(ctx: *Entity, comptime comp_type: type) ?*Component {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+        var it = world.components.iteratorFilterByEntity(ctx, comp_type);
+        var next = it.next();
+        return next;
     }
 
     //inlining this causes compiler issues
@@ -302,9 +391,16 @@ pub const Entity = struct {
         component.attached = true;
         component.allocated = true;
         
-        world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
-        world.components.entity_mask[@intCast(usize, component.typeId.?)].setValue(self.id, true);
+        world._entities[self.chunk].component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
+        world._components[component.chunk].entity_mask[@intCast(usize, component.typeId.?)].setValue(self.id, true);
         component.owners.setValue(self.id, true);
+
+        //Link entity by component type
+        var i: usize = 0;
+        while(i < componentCount()) : (i += 1) {
+            var queue = std.TailQueue(*Entity){};
+            self.type_entities[i] = queue;
+        }
 
         //Append to the linked list of components
         self.type_components[@intCast(usize, component.typeId.?)].append(&component.type_node);
@@ -313,13 +409,17 @@ pub const Entity = struct {
     pub inline fn detach(self: *Entity, component: *Component) !void {
         component.attached = false;
         component.owner = null;
-        self.world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, false);
+        component.owners.setValue(self.id, false);
+        self.world._entities[self.chunk].component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, false);
     }
 
     pub inline fn destroy(self: *Entity) void {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
 
         self.alive = false;
+        world._entities[self.chunk].alive -= 1;
+        world._entities[self.chunk].free_idx = self.id;
+        world.entities_free_idx = self.chunk;
         world.entities.alive -= 1;
     }
 
@@ -353,7 +453,7 @@ pub fn typeToId(comptime T: type) u32 {
 }
 
 pub inline fn componentCount() usize {
-    @setEvalBranchQuota(MAX_COMPONENTS * 2);
+    @setEvalBranchQuota(CHUNK_SIZE * 2);
     var idx: u32 = 0;
     inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
         const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
@@ -374,36 +474,67 @@ pub inline fn Cast(comptime T: type, component: ?*Component) *T {
         return field_ptr;
 }
 
-const Entities = struct {
-    len: u32 = 0,
-    sparse: [MAX_ENTITIES]*Entity,
-    sparse_data: [MAX_ENTITIES]Entity,
-    alive: u32 = 0,
-    free_idx: u32 = 0,
-    resized: u32 = 0,
+pub const SuperEntities = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
-    created: u32 = 0,
-    component_mask: [componentCount()]std.StaticBitSet(MAX_COMPONENTS_BY_TYPE),
+    alive: usize,
+
+    pub inline fn count(ctx: *SuperEntities) u32 {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        var i: usize = 0;
+        var total: u32 = 0;
+        while(i < world.entities_len) : (i += 1) {
+            total += world._entities[i].alive;
+        }
+        return total;
+    }
+
+    pub fn create(ctx: *SuperEntities) !*Entity {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        defer ctx.alive += 1;
+
+        if(world._entities[world.entities_free_idx].len < CHUNK_SIZE) {
+            return try world._entities[world.entities_free_idx].create();
+        } else { //Create new chunk
+            try ctx.expand();
+            return try world._entities[world.entities_free_idx].create();
+        }
+    }
+
+    pub fn expand(ctx: *SuperEntities) !void {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        world._entities = try world.allocator.realloc(world._entities, world.entities_len + 1);
+        world._entities[world.entities_len].world = world;
+        world._entities[world.entities_len].len = 0;
+        world._entities[world.entities_len].alive = 0;
+        world._entities[world.entities_len].free_idx = 0;
+        world._entities[world.entities_len].sparse = try world.allocator.alloc(Entity, CHUNK_SIZE);
+
+        var i: usize = 0;
+        while(i < componentCount()) : (i += 1) {
+            world._entities[world.entities_len].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
+        }
+
+        world.entities_len += 1;
+        world.entities_free_idx = world.entities_len - 1;
+        entities_idx = world.entities_free_idx;
+    }
 
     pub const Iterator = struct {
-        ctx: *const Entities,
+        ctx: *[]Entities,
         index: usize = 0,
-        alive: u32 = 0,
+        alive: usize = 0,
 
         pub inline fn next(it: *Iterator) ?*Entity {
-            if (it.ctx.alive == 0) return null;
-
-            const end = it.alive;
-            var metadata = it.index;
-
-            while (metadata < end) : ({
-                metadata += 1;
-                it.index += 1;
-            }) {
-                if (it.ctx.sparse[it.index].alive) {
-                    var sparse_index = it.index;
+            while (it.index < it.alive) : (it.index += 1) {
+                var mod = it.index / CHUNK_SIZE;
+                var rem = @rem(it.index, CHUNK_SIZE);
+                if (it.ctx.*[mod].sparse[rem].alive) {
+                    var sparse_index = rem;
                     it.index += 1;
-                    return it.ctx.sparse[sparse_index];
+                    return &it.ctx.*[mod].sparse[sparse_index];
                 }
             }
 
@@ -413,23 +544,20 @@ const Entities = struct {
 
     //TODO: Rewrite to use bitset iterator?
     pub const MaskedIterator = struct {
-        ctx: *const Entities,
+        ctx: *[]Entities,
         index: usize = 0,
         filter_type: u32,
-        alive: u32 = 0,
+        alive: usize = 0,
+        world: *World,
 
         pub fn next(it: *MaskedIterator) ?*Entity {
-            if (it.ctx.alive == 0) return null;
-
-            var world = @ptrCast(*World, @alignCast(@alignOf(World), it.ctx.world));
-            //TODO: Count unique types
-            const end = it.ctx.alive;
-
-            while (it.index < end) : (it.index += 1) {
-                if (world.components.entity_mask[it.filter_type].isSet(it.index)) {
-                    var sparse_index = it.index;
+            while (it.index < it.alive) : (it.index += 1) {
+                var mod = it.index / CHUNK_SIZE;
+                var rem = @rem(it.index, CHUNK_SIZE);
+                if (it.world._components[mod].entity_mask[it.filter_type].isSet(rem)) {
+                    var sparse_index = rem;
                     it.index += 1;
-                    return it.ctx.sparse[sparse_index];
+                    return &it.ctx.*[mod].sparse[sparse_index];
                 }
             }
 
@@ -437,60 +565,69 @@ const Entities = struct {
         }
     };
 
+    pub inline fn iterator(ctx: *SuperEntities) SuperEntities.Iterator {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+        var entities = &world._entities;
+        return .{ .ctx = entities, .alive = ctx.alive};
+    }
+
+    pub fn iteratorFilter(ctx: *SuperEntities, comptime comp_type: type) SuperEntities.MaskedIterator {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+        var entities = &world._entities;
+
+        //TODO: Go through each chunk
+        //get an iterator for entities attached to this entity
+        return .{ .ctx = entities,
+                  .filter_type = typeToId(comp_type),
+                  .alive = world.components.alive,
+                  .world = world };
+    }
+};
+
+const Entities = struct {
+    len: u32 = 0,
+    sparse: []Entity,
+    alive: u32 = 0,
+    free_idx: u32 = 0,
+    world: ?*anyopaque = undefined, //Defeats cyclical reference checking
+    created: u32 = 0,
+    component_mask: [componentCount()]std.StaticBitSet(CHUNK_SIZE),
+
     pub inline fn create(ctx: *Entities) !*Entity {
         //most ECS cheat here and don't allocate memory until a component is assigned
 
         //find end of sparse array
         var wrapped = false;
-        while(ctx.sparse_data[ctx.free_idx].alive == true) {
-            if(wrapped and ctx.free_idx > MAX_ENTITIES)
+        while(ctx.sparse[ctx.free_idx].alive == true) {
+            if(wrapped and ctx.free_idx > CHUNK_SIZE)
                 return error.NoFreeEntitySlots;
 
             ctx.free_idx = ctx.alive + 1;
-            if(ctx.free_idx > MAX_ENTITIES - 1) {
+            if(ctx.free_idx > CHUNK_SIZE - 1) {
                 ctx.free_idx = 0;
                 wrapped = true;
             }
         }
 
-        var entity = &ctx.sparse_data[ctx.free_idx];
+        if(!wrapped)
+            ctx.len += 1;
+
+        var entity = &ctx.sparse[ctx.free_idx];
         entity.id = ctx.free_idx;
         entity.alive = true;
         entity.world = ctx.world;
-
+        entity.chunk = entities_idx;
+        
         var i: usize = 0;
         while(i < componentCount()) : (i += 1) {
             var queue = std.TailQueue(*Component){};
             entity.type_components[i] = queue;
         }
 
-        ctx.sparse[ctx.free_idx] = entity;
         ctx.alive += 1;
         ctx.free_idx += 1;
         
         return entity;
-    }
-
-    pub inline fn remove(ctx: *Entities, entity: []*Entity) void {
-        //mark as removed
-        for(entity[0..]) |ent| {
-            if(ctx.sparse[@intCast(usize, ent.id)].alive == true) {
-                ctx.sparse[@intCast(usize, ent.id)].alive = false;
-                ctx.free_idx = ent.id;
-                ctx.alive -= 1;
-            }
-        }
-    }
-
-    pub inline fn iterator(self: *const Entities) Iterator {
-        return .{ .ctx = self, .alive = self.alive };
-    }
-
-    pub fn iteratorFilter(self: *Entities, comptime comp_type: type) MaskedIterator {
-        //get an iterator for entities attached to this entity
-        return .{ .ctx = self,
-                  .filter_type = typeToId(comp_type),
-                  .alive = self.alive };
     }
 
     pub inline fn count(ctx: *Entities) u32 {

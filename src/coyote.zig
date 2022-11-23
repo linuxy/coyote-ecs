@@ -357,8 +357,8 @@ pub const Entity = struct {
         component.attached = true;
         component.allocated = true;
         
-        //world._entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
-        //world._components.entity_mask[@intCast(usize, component.typeId.?)].setValue(self.id, true);
+        world._entities[self.chunk].component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
+        world._components[component.chunk].entity_mask[@intCast(usize, component.typeId.?)].setValue(self.id, true);
         component.owners.setValue(self.id, true);
 
         //Link entity by component type
@@ -376,7 +376,7 @@ pub const Entity = struct {
         component.attached = false;
         component.owner = null;
         component.owners.setValue(self.id, false);
-        //self.world.entities.component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, false);
+        self.world._entities[self.chunk].component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, false);
     }
 
     pub inline fn destroy(self: *Entity) void {

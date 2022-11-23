@@ -73,10 +73,10 @@ pub fn main() !void {
 
     std.log.info("Apple entities: {}", .{i});
 
-    if(aPear.getOneComponent(Components.Pear) != null)
-        std.log.info("Pear entities: >= 1", .{})
-    else
-        std.log.info("Pear entities: 0", .{});
+//    if(aPear.getOneComponent(Components.Pear) != null)
+//        std.log.info("Pear entities: >= 1", .{})
+//    else
+//        std.log.info("Pear entities: 0", .{});
 
     try Systems.run(Grow, .{world});
     try Systems.run(Harvest, .{world});
@@ -109,6 +109,7 @@ pub fn Grow(world: *World) void {
 
 pub fn Harvest(world: *World) void {
     var it = world.components.iterator();
+    std.log.info("harvest it: {}", .{it});
     var i: u32 = 0;
     while(it.next()) |component| {
         if(component.is(Components.Orange)) {
@@ -129,6 +130,7 @@ pub fn Harvest(world: *World) void {
                 i += 1;
             }
         }
+        std.log.info("i: {}", .{i});
         component.destroy();
     }
     

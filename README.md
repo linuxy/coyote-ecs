@@ -66,7 +66,7 @@ pub fn main() !void {
     try anApple.attach(appleComponent, Components.Apple{.color = 0, .ripe = false, .harvested = false});
     _ = try aPear.addComponent(Components.Pear, Components.Pear{.color = 1, .ripe = false, .harvested = false});
 
-    //Create 1k entities and attach 1k unique components
+    //Create 50k entities and attach 50k unique components
     var i: usize = 0;
     while(i < 50000) : (i += 1) {
         var anEntity = try world.entities.create();

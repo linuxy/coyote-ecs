@@ -45,8 +45,9 @@ pub const SuperComponents = struct {
         world._components[world.components_len].len = 0;
         world._components[world.components_len].alive = 0;
         world._components[world.components_len].free_idx = 0;
+        world._components[world.components_len].created = 0;
         world._components[world.components_len].sparse = try world.allocator.alloc(Component, CHUNK_SIZE);
-
+        
         var i: usize = 0;
         while(i < componentCount()) : (i += 1) {
             world._components[world.components_len].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
@@ -185,7 +186,7 @@ pub const _Components = struct {
     pub fn create(ctx: *_Components, comptime comp_type: type) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
-        if(ctx.alive > CHUNK_SIZE)
+        if(ctx.alive >= CHUNK_SIZE)
             return error.NoFreeComponentSlots;
 
         //find end of sparse array

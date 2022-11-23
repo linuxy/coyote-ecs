@@ -1,28 +1,16 @@
 const std = @import("std");
 const Arena = @import("./mimalloc_arena.zig").Arena;
 
-//If zig_probe_stack segfaults this is too high, use heap if needed.
-//TODO: Use heap past 10k-20k components
-
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
 const CHUNK_SIZE = 1024; //Only operate on one chunk at a time
 
 //No chunk should know of another chunk
+//Modulo hash ID->CHUNK
 
 //SuperComponents map component chunks to current layout
 pub const SuperComponents = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
-
-    pub fn create(ctx: *SuperComponents, comptime comp_type: type) !*Component {
-        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
-
-        //TODO: This doesn't find free component slots from deleted components
-        if(world._components[world.components_len - 1].len < CHUNK_SIZE) {
-            return try world._components[world.components_len - 1].create(comp_type);
-        } else {
-            return try world.allocator.create(Component);
-        }
-    }
+    alive: usize,
 
     pub inline fn count(ctx: *SuperComponents) u32 {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
@@ -35,6 +23,28 @@ pub const SuperComponents = struct {
         return total;
     }
 
+    pub fn create(ctx: *SuperComponents, comptime comp_type: type) !*Component {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        defer ctx.alive += 1;
+
+        if(world._components[world.components_free_idx].len < CHUNK_SIZE) {
+            return try world._components[world.components_free_idx].create(comp_type);
+        } else {
+            try ctx.expand();
+            return try world._components[world.components_free_idx].create(comp_type);
+        }
+    }
+
+    pub fn expand(ctx: *SuperComponents) !void {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        world._components = try world.allocator.realloc(world._components, world.components_len + 1);
+        world.components_len += 1;
+
+    }
+
+    //TODO: By attached vs unattached
     pub inline fn iterator(ctx: *SuperComponents) _Components.Iterator {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
         var components = &world._components[world.components_len - 1];
@@ -118,6 +128,12 @@ pub const _Components = struct {
         }
     };
 
+    pub inline fn count(ctx: *_Components) u32 {
+        //count of all living components
+
+        return ctx.alive;
+    }
+
     //don't inline to avoid branch quota issues
     pub fn create(ctx: *_Components, comptime comp_type: type) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
@@ -162,12 +178,6 @@ pub const _Components = struct {
         return component;
     }
 
-    pub inline fn count(ctx: *_Components) u32 {
-        //count of all living components
-
-        return ctx.alive;
-    }
-
     pub inline fn iterator(self: *const _Components) Iterator {
         return .{ .ctx = self, .alive = self.alive };
     }
@@ -196,6 +206,8 @@ pub const World = struct {
     _components: []_Components,
     entities_len: usize = 0,
     components_len: usize = 0,
+    components_free_idx: usize = 0,
+    entities_free_idx: usize = 0,
 
     systems: Systems,
     allocator: std.mem.Allocator,
@@ -205,12 +217,18 @@ pub const World = struct {
         var arena = try Arena.init();
         var allocator = arena.allocator();
         var world = allocator.create(World) catch unreachable;
+
         world.allocator = allocator;
         world.arena = arena;
         world.entities.world = world;
         world.components.world = world;
         world.entities_len = 1;
         world.components_len = 1;
+        world.entities_free_idx = 0;
+        world.components_free_idx = 0;
+        world.components.alive = 0;
+        world.entities.alive = 0;
+
         world._entities = try allocator.alloc(Entities, 1);
         world._entities[entities_idx] = Entities{.sparse = undefined,
                                   .sparse_data = undefined,
@@ -240,6 +258,7 @@ pub const World = struct {
         self.arena.deinit();
         self.allocator.destroy(self);
     }
+
 };
 
 const Component = struct {
@@ -290,7 +309,8 @@ const Component = struct {
         
         world._components[self.chunk].alive -= 1;
         world._components[self.chunk].free_idx = self.id;
-
+        world.components_free_idx = self.chunk;
+        world.components.alive -= 1;
     }
 };
 
@@ -385,6 +405,8 @@ pub const Entity = struct {
         self.alive = false;
         world._entities[self.chunk].alive -= 1;
         world._entities[self.chunk].free_idx = self.id;
+        world.entities_free_idx = self.chunk;
+        world.entities.alive -= 1;
     }
 
     pub inline fn set(self: *Entity, component: *Component, comptime comp_type: type, members: anytype) !void {
@@ -440,6 +462,7 @@ pub inline fn Cast(comptime T: type, component: ?*Component) *T {
 
 pub const SuperEntities = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
+    alive: usize,
 
     pub inline fn count(ctx: *SuperEntities) u32 {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
@@ -452,14 +475,25 @@ pub const SuperEntities = struct {
         return total;
     }
 
-    //TODO: This doesn't find free entity slots from deleted entities
     pub fn create(ctx: *SuperEntities) !*Entity {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
-        if(world._entities[world.entities_len - 1].len < CHUNK_SIZE) {
-            return try world._entities[world.entities_len - 1].create();
+
+        defer ctx.alive += 1;
+
+        if(world._entities[world.entities_free_idx].len < CHUNK_SIZE) {
+            return try world._entities[world.entities_free_idx].create();
         } else { //Create new chunk
-            return try world.allocator.create(Entity);
+            try ctx.expand();
+            return try world._entities[world.entities_free_idx].create();
         }
+    }
+
+    pub fn expand(ctx: *SuperEntities) !void {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        world._entities = try world.allocator.realloc(world._entities, world.entities_len + 1);
+        world.entities_len += 1;
+
     }
 
     pub inline fn iterator(ctx: *SuperEntities) Entities.Iterator {
@@ -576,17 +610,6 @@ const Entities = struct {
         ctx.free_idx += 1;
         
         return entity;
-    }
-
-    pub inline fn remove(ctx: *Entities, entity: []*Entity) void {
-        //mark as removed
-        for(entity[0..]) |ent| {
-            if(ctx.sparse[@intCast(usize, ent.id)].alive == true) {
-                ctx.sparse[@intCast(usize, ent.id)].alive = false;
-                ctx.free_idx = ent.id;
-                ctx.alive -= 1;
-            }
-        }
     }
 
     pub inline fn iterator(self: *const Entities) Iterator {

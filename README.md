@@ -12,6 +12,9 @@ To build:
 A more complete example:
 [coyote-snake](https://github.com/linuxy/coyote-snake)
 
+Benchmark:
+[coyote-bunnies](https://github.com/linuxy/coyote-bunnies)
+
 Define your components in a container
 ```Zig
 const std = @import("std");

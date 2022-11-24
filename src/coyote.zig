@@ -98,7 +98,7 @@ pub const SuperComponents = struct {
         alive: usize = 0,
         world: *World,
 
-        pub inline fn next(it: *MaskedIterator) ?*Component {
+        pub fn next(it: *MaskedIterator) ?*Component {
             //TODO: Count unique types
 
             while (it.index < it.alive) : (it.index += 1) {
@@ -160,7 +160,7 @@ pub const SuperComponents = struct {
         var components = &world._components;
         return .{ .ctx = components,
                   .filter_type = typeToId(comp_type),
-                  .alive = ctx.alive,
+                  .alive = CHUNK_SIZE * world.components_len,
                   .world = world };
     }
 

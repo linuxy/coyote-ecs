@@ -222,9 +222,17 @@ pub const _Components = struct {
 
         component.world = world;
         component.attached = false;
+
+        //Optimize: Match free indexes to like components
+        //TODO: Store alignment for raw free?
+        //if(component.allocated and component.typeId != null and component.typeId != typeToId(comp_type))
+        //    world.allocator.destroy(component.data.?);
+
+        if(component.typeId != typeToId(comp_type))
+            component.allocated = false;
+
         component.typeId = typeToId(comp_type);
         component.id = ctx.free_idx;
-        component.allocated = false;
         component.alive = true;
         component.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
         component.type_node = .{.data = component};
@@ -355,10 +363,8 @@ const Component = struct {
 
         //TODO: Destroy data? If allocated just hold to reuse.
         if(self.alive) {
-            self.data = null;
             self.attached = false;
             self.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
-            self.typeId = null;
             self.alive = false;
             
             if(world._components[self.chunk].alive > 0)
@@ -403,10 +409,15 @@ pub const Entity = struct {
         if(@sizeOf(@TypeOf(comp_type)) > 0) {
             var ref = @TypeOf(comp_type){};
             ref = comp_type;
-            var data = try world.allocator.create(@TypeOf(comp_type));
-            data.* = comp_type;
-            var oref = @ptrCast(?*anyopaque, data);
-            component.data = oref;
+            if(!component.allocated) {
+                var data = try world.allocator.create(@TypeOf(comp_type));
+                data.* = comp_type;
+                var oref = @ptrCast(?*anyopaque, data);
+                component.data = oref;
+            } else {
+                var data = CastData(@TypeOf(comp_type), component.data);
+                data.* = comp_type;
+            }
         }
         component.attached = true;
         component.allocated = true;
@@ -491,6 +502,11 @@ pub inline fn componentCount() usize {
 
 pub inline fn Cast(comptime T: type, component: ?*Component) *T {
         var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.?.data));
+        return field_ptr;
+}
+
+pub inline fn CastData(comptime T: type, component: ?*anyopaque) *T {
+        var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component));
         return field_ptr;
 }
 

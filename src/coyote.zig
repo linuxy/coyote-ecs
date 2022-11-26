@@ -20,6 +20,8 @@ pub const SuperComponents = struct {
     alive_bitmap_r: *RoaringBitmap,
     alive_bitmap_w: *RoaringBitmap,
     components: *[]_Components,
+    sync_mutex: std.Thread.Mutex = .{},
+
     //type_bitmap: [componentCount()]*RoaringBitmap,
 
     pub inline fn count(ctx: *SuperComponents) u32 {
@@ -75,6 +77,12 @@ pub const SuperComponents = struct {
         components_idx = world.components_free_idx;
     }
 
+    pub fn sync(ctx: *SuperComponents) void {
+        ctx.sync_mutex.lock();
+        _ = c.roaring_bitmap_overwrite(ctx.alive_bitmap_r, ctx.alive_bitmap_w);
+        ctx.sync_mutex.unlock();
+    }
+
     pub const RoaringTypeIterator = struct {
         ctx: *SuperComponents,
         rit: *c.roaring_uint32_iterator_t,
@@ -83,15 +91,19 @@ pub const SuperComponents = struct {
         filter_type: u32,
 
         pub inline fn next(it: *RoaringTypeIterator) ?*Component {
+            it.ctx.sync_mutex.lock();
+            defer it.ctx.sync_mutex.unlock();
             while(it.rit.has_value) {
                 _ = c.roaring_read_uint32_iterator(it.rit, @ptrCast([*c]u32, &it.buf), 1);
                 var index = it.buf[0];
                 var mod = index / CHUNK_SIZE;
                 var rem = @rem(index, CHUNK_SIZE);
-                if(it.ctx.components.*[mod].sparse[rem].typeId == it.filter_type)
-                    return &it.ctx.components.*[mod].sparse[rem];
+                if(it.ctx.components.*[mod].sparse[rem].alive and it.ctx.components.*[mod].sparse[rem].typeId == it.filter_type)
+                    return &it.ctx.components.*[mod].sparse[rem]
+                else
+                    continue;
             }
-            _ = c.roaring_bitmap_overwrite(it.bitmap, it.ctx.alive_bitmap_w);
+            _ = c.roaring_bitmap_overwrite(it.ctx.alive_bitmap_r, it.ctx.alive_bitmap_w);
             c.roaring_free_uint32_iterator(it.rit);
             return null;
         }
@@ -138,15 +150,21 @@ pub const SuperComponents = struct {
         buf: [1]u32 = [_]u32{0},
 
         pub inline fn next(it: *RoaringIterator) ?*Component {
+            it.ctx.sync_mutex.lock();
+            defer it.ctx.sync_mutex.unlock();
             while(it.rit.has_value) {
                 _ = c.roaring_read_uint32_iterator(it.rit, @ptrCast([*c]u32, &it.buf), 1);
                 var index = it.buf[0];
                 var mod = index / CHUNK_SIZE;
                 var rem = @rem(index, CHUNK_SIZE);
                 //std.log.info("mod: {} rem: {} index: {}", .{mod, rem, index});
-                return &it.ctx.components.*[mod].sparse[rem];
+                if(it.ctx.components.*[mod].sparse[rem].alive)
+                    return &it.ctx.components.*[mod].sparse[rem]
+                else
+                    continue;
             }
-            _ = c.roaring_bitmap_overwrite(it.bitmap, it.ctx.alive_bitmap_w);
+            //defer it.ctx.sync();
+            _ = c.roaring_bitmap_overwrite(it.ctx.alive_bitmap_r, it.ctx.alive_bitmap_w);
             //std.log.info("roaring_bitmap_get_cardinality: {}", .{c.roaring_bitmap_get_cardinality(it.bitmap)});
             c.roaring_free_uint32_iterator(it.rit);
             return null;
@@ -376,6 +394,7 @@ const Component = struct {
     pub inline fn destroy(self: *Component) void {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
 
+        std.log.info("destroy() world.components.alive: {} id: {} alive: {} count: {} chunk: {}", .{world.components.alive, self.id, self.alive, world.components.count(), self.chunk});
         //TODO: Destroy data? If allocated just hold to reuse.
         if(self.alive) {
             self.attached = false;
@@ -391,7 +410,11 @@ const Component = struct {
             if(world.components.alive > 0)
                 world.components.alive -= 1;
 
+            world.components.sync_mutex.lock();
             _ = c.roaring_bitmap_remove_checked(world.components.alive_bitmap_w, @intCast(u32, self.chunk * 128) + self.id);
+            world.components.sync_mutex.unlock();
+
+            std.log.info("world.components.alive: {} count: {} id: {}", .{world.components.alive, world.components.count(), self.id});
         }
     }
 };

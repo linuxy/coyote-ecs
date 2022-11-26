@@ -17,8 +17,10 @@ const RoaringBitmap = c.roaring_bitmap_t;
 pub const SuperComponents = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     alive: usize,
-    component_bitmap: *RoaringBitmap,
-    
+    alive_bitmap: *RoaringBitmap,
+    components: *[]_Components,
+    //type_bitmap: [componentCount()]*RoaringBitmap,
+
     pub inline fn count(ctx: *SuperComponents) u32 {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
@@ -46,10 +48,12 @@ pub const SuperComponents = struct {
 
         if(world._components[free].alive < CHUNK_SIZE) {
             var component: *Component = try world._components[free].create(comp_type);
+            c.roaring_bitmap_add(ctx.alive_bitmap, @intCast(u32, @divTrunc(ctx.alive, CHUNK_SIZE)*CHUNK_SIZE) + @intCast(u32, @rem(ctx.alive, CHUNK_SIZE)));
             return component;
         } else {
             try ctx.expand();
             var component: *Component = try world._components[world.components_len - 1].create(comp_type);
+            c.roaring_bitmap_add(ctx.alive_bitmap, @intCast(u32, @divTrunc(ctx.alive, CHUNK_SIZE)*CHUNK_SIZE) + @intCast(u32, @rem(ctx.alive, CHUNK_SIZE)));
             return component;
         }
     }
@@ -77,47 +81,24 @@ pub const SuperComponents = struct {
         components_idx = world.components_free_idx;
     }
 
-    pub const Iterator = struct {
-        ctx: *[]_Components,
-        index: usize = 0,
-        alive: usize = 0,
-        world: *World,
-
-        pub inline fn next(it: *Iterator) ?*Component {
-            while (it.index < it.alive) : (it.index += 1) {
-                var mod = it.index / CHUNK_SIZE;
-                var rem = @rem(it.index, CHUNK_SIZE);
-                if (it.ctx.*[mod].sparse[rem].alive) {
-                    var sparse_index = rem;
-                    it.index += 1;
-                    return &it.ctx.*[mod].sparse[sparse_index];
-                }
-            }
-
-            return null;
-        }
-    };
-
-    pub const MaskedIterator = struct {
-        ctx: *[]_Components,
-        index: usize = 0,
+    pub const RoaringTypeIterator = struct {
+        ctx: *SuperComponents,
+        rit: *c.roaring_uint32_iterator_t,
+        bitmap: *RoaringBitmap,
+        buf: [1]u32 = [_]u32{0},
         filter_type: u32,
-        alive: usize = 0,
-        world: *World,
 
-        pub fn next(it: *MaskedIterator) ?*Component {
-            //TODO: Count unique types
-
-            while (it.index < it.alive) : (it.index += 1) {
-                var mod = it.index / CHUNK_SIZE;
-                var rem = @rem(it.index, CHUNK_SIZE);
-                if (it.world._components[mod].sparse[rem].typeId == it.filter_type) {
-                    var sparse_index = rem;
-                    it.index += 1;
-                    return &it.ctx.*[mod].sparse[sparse_index];
-                }
+        pub inline fn next(it: *RoaringTypeIterator) ?*Component {
+            while(it.rit.has_value) {
+                _ = c.roaring_read_uint32_iterator(it.rit, @ptrCast([*c]u32, &it.buf), 1);
+                var index = it.buf[0];
+                var mod = index / CHUNK_SIZE;
+                var rem = @rem(index, CHUNK_SIZE);
+                if(it.ctx.components.*[mod].sparse[rem].typeId == it.filter_type)
+                    return &it.ctx.components.*[mod].sparse[rem];
             }
-
+            c.roaring_bitmap_free(it.bitmap);
+            c.roaring_free_uint32_iterator(it.rit);
             return null;
         }
     };
@@ -155,20 +136,44 @@ pub const SuperComponents = struct {
     };
 
     //TODO: By attached vs unattached
-    pub inline fn iterator(ctx: *SuperComponents) SuperComponents.Iterator {
-        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
-        var components = &world._components;
-        return .{ .ctx = components, .index = 0, .alive = CHUNK_SIZE * world.components_len, .world = world };
+
+    pub const RoaringIterator = struct {
+        ctx: *SuperComponents,
+        rit: *c.roaring_uint32_iterator_t,
+        bitmap: *RoaringBitmap,
+        buf: [1]u32 = [_]u32{0},
+
+        pub inline fn next(it: *RoaringIterator) ?*Component {
+            while(it.rit.has_value) {
+                _ = c.roaring_read_uint32_iterator(it.rit, @ptrCast([*c]u32, &it.buf), 1);
+                var index = it.buf[0];
+                var mod = index / CHUNK_SIZE;
+                var rem = @rem(index, CHUNK_SIZE);
+                return &it.ctx.components.*[mod].sparse[rem];
+            }
+            c.roaring_bitmap_free(it.bitmap);
+            c.roaring_free_uint32_iterator(it.rit);
+            return null;
+        }
+    };
+
+    pub fn iterator(ctx: *SuperComponents) SuperComponents.RoaringIterator {
+        var bitmap = c.roaring_bitmap_copy(ctx.alive_bitmap);
+        var it: *c.roaring_uint32_iterator_t = c.roaring_create_iterator(bitmap);
+        return .{.ctx = ctx,
+                 .rit = it,
+                 .bitmap = bitmap};
     }
 
-    pub fn iteratorFilter(ctx: *SuperComponents, comptime comp_type: type) SuperComponents.MaskedIterator {
-        //get an iterator for components attached to this entity
-        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
-        var components = &world._components;
-        return .{ .ctx = components,
-                  .filter_type = typeToId(comp_type),
-                  .alive = CHUNK_SIZE * world.components_len,
-                  .world = world };
+    pub fn iteratorFilter(ctx: *SuperComponents, comptime comp_type: type) SuperComponents.RoaringTypeIterator {
+        var bitmap = c.roaring_bitmap_copy(ctx.alive_bitmap);
+        var it: *c.roaring_uint32_iterator_t = c.roaring_create_iterator(ctx.alive_bitmap);
+
+        return .{.ctx = ctx,
+                 .rit = it,
+                 .filter_type = typeToId(comp_type),
+                 .bitmap = bitmap,
+                };
     }
 
     pub fn iteratorFilterByEntity(ctx: *SuperComponents, entity: *Entity, comptime comp_type: type) SuperComponents.MaskedEntityIterator {
@@ -296,7 +301,8 @@ pub const World = struct {
         world.components.alive = 0;
         world.entities.alive = 0;
 
-        world.components.component_bitmap = c.roaring_bitmap_create();
+        world.components.alive_bitmap = c.roaring_bitmap_create();
+        world.components.components = &world._components;
 
         world._entities = try allocator.alloc(Entities, 1);
         world._entities[entities_idx].world = world;
@@ -319,6 +325,7 @@ pub const World = struct {
         while(i < componentCount()) {
             world._entities[entities_idx].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
             world._components[components_idx].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
+            //world.components.type_bitmap[i] = c.roaring_bitmap_create();
             i += 1;
         }
 
@@ -383,6 +390,8 @@ const Component = struct {
 
             if(world.components.alive > 0)
                 world.components.alive -= 1;
+
+            _ = c.roaring_bitmap_remove_checked(world.components.alive_bitmap, @intCast(u32, self.chunk * 128) + self.id);
         }
     }
 };

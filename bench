@@ -1,3 +1,19 @@
+[Pre Unoptimize]
 Benchmark 1: ./zig-out/bin/ecs
   Time (mean ± σ):      13.5 ms ±   0.8 ms    [User: 12.2 ms, System: 1.0 ms]
   Range (min … max):    12.2 ms …  17.9 ms    206 runs
+
+[Pre Roaring]
+Benchmark 1: ./zig-out/bin/ecs
+  Time (mean ± σ):      24.2 ms ±   1.0 ms    [User: 22.9 ms, System: 1.2 ms]
+  Range (min … max):    22.4 ms …  29.5 ms    109 runs
+
+[Roaring Components Iterator and Type Iterator]
+Benchmark 1: ./zig-out/bin/ecs
+  Time (mean ± σ):      24.3 ms ±   0.8 ms    [User: 23.1 ms, System: 1.0 ms]
+  Range (min … max):    23.0 ms …  26.9 ms    114 runs
+
+[Roaring iterator copy]
+Benchmark 1: ./zig-out/bin/ecs
+  Time (mean ± σ):      25.4 ms ±   1.1 ms    [User: 23.9 ms, System: 1.4 ms]
+  Range (min … max):    23.8 ms …  31.0 ms    108 runs

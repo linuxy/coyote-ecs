@@ -1,0 +1,3 @@
+Benchmark 1: ./zig-out/bin/ecs
+  Time (mean ± σ):      13.5 ms ±   0.8 ms    [User: 12.2 ms, System: 1.0 ms]
+  Range (min … max):    12.2 ms …  17.9 ms    206 runs

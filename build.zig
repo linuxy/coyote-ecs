@@ -12,8 +12,11 @@ pub fn build(b: *std.build.Builder) void {
     exe.use_stage1 = true;
     exe.linkLibC();
     exe.addPackage(ecsPkg);
+    exe.addIncludePath("vendor/CRoaring/include");
+    exe.addLibraryPath("vendor/CRoaring/build/src");
     exe.addLibraryPath("vendor/mimalloc");
     exe.linkSystemLibrary("mimalloc");
+    exe.linkSystemLibrary("roaring");
     exe.install();
 
     const run_cmd = exe.run();

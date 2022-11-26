@@ -7,11 +7,18 @@ const CHUNK_SIZE = 128; //Only operate on one chunk at a time
 //No chunk should know of another chunk
 //Modulo ID/CHUNK
 
+const c = @cImport({
+    @cInclude("roaring/roaring.h");
+});
+
+const RoaringBitmap = c.roaring_bitmap_t;
+
 //SuperComponents map component chunks to current layout
 pub const SuperComponents = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     alive: usize,
-
+    component_bitmap: *RoaringBitmap,
+    
     pub inline fn count(ctx: *SuperComponents) u32 {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
@@ -266,6 +273,8 @@ pub const World = struct {
         world.components.alive = 0;
         world.entities.alive = 0;
 
+        world.components.component_bitmap = c.roaring_bitmap_create();
+
         world._entities = try allocator.alloc(Entities, 1);
         world._entities[entities_idx].world = world;
         world._entities[entities_idx].len = 0;
@@ -294,7 +303,6 @@ pub const World = struct {
 
     pub fn destroy(self: *World) void {
         self.arena.deinit();
-        self.allocator.destroy(self);
     }
 
 };

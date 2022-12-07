@@ -3,6 +3,7 @@ const Arena = @import("./mimalloc_arena.zig").Arena;
 
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
 const CHUNK_SIZE = 128; //Only operate on one chunk at a time
+const SAFETY = false; //Runtime safety ~50% faster
 
 //No chunk should know of another chunk
 //Modulo ID/CHUNK
@@ -12,7 +13,9 @@ pub const SuperComponents = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     alive: usize,
 
-    pub inline fn count(ctx: *SuperComponents) u32 {
+    pub fn count(ctx: *SuperComponents) u32 {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         var i: usize = 0;
@@ -24,6 +27,8 @@ pub const SuperComponents = struct {
     }
 
     pub fn create(ctx: *SuperComponents, comptime comp_type: type) !*Component {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         defer ctx.alive += 1;
@@ -48,6 +53,8 @@ pub const SuperComponents = struct {
     }
 
     pub fn expand(ctx: *SuperComponents) !void {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         var temp = try world.allocator.realloc(world._components, world.components_len + 1);
@@ -76,7 +83,9 @@ pub const SuperComponents = struct {
         alive: usize = 0,
         world: *World,
 
-        pub inline fn next(it: *Iterator) ?*Component {
+        pub fn next(it: *Iterator) ?*Component {
+            @setRuntimeSafety(SAFETY);
+
             while (it.index < it.alive) : (it.index += 1) {
                 var mod = it.index / CHUNK_SIZE;
                 var rem = @rem(it.index, CHUNK_SIZE);
@@ -99,6 +108,7 @@ pub const SuperComponents = struct {
         world: *World,
 
         pub fn next(it: *MaskedIterator) ?*Component {
+            @setRuntimeSafety(SAFETY);
             //TODO: Count unique types
 
             while (it.index < it.alive) : (it.index += 1) {
@@ -125,7 +135,8 @@ pub const SuperComponents = struct {
         world: *World,
         entity: *Entity,
 
-        pub inline fn next(it: *MaskedEntityIterator) ?*Component {
+        pub fn next(it: *MaskedEntityIterator) ?*Component {
+            @setRuntimeSafety(SAFETY);
             //TODO: Count unique types
 
             //Scan all components in every chunk, find the first matching component type owned by the entity
@@ -148,13 +159,17 @@ pub const SuperComponents = struct {
     };
 
     //TODO: By attached vs unattached
-    pub inline fn iterator(ctx: *SuperComponents) SuperComponents.Iterator {
+    pub fn iterator(ctx: *SuperComponents) SuperComponents.Iterator {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
         var components = &world._components;
         return .{ .ctx = components, .index = 0, .alive = CHUNK_SIZE * world.components_len, .world = world };
     }
 
     pub fn iteratorFilter(ctx: *SuperComponents, comptime comp_type: type) SuperComponents.MaskedIterator {
+        @setRuntimeSafety(SAFETY);
+
         //get an iterator for components attached to this entity
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
         var components = &world._components;
@@ -165,6 +180,8 @@ pub const SuperComponents = struct {
     }
 
     pub fn iteratorFilterByEntity(ctx: *SuperComponents, entity: *Entity, comptime comp_type: type) SuperComponents.MaskedEntityIterator {
+        @setRuntimeSafety(SAFETY);
+
         //get an iterator for components attached to this entity
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
         var components = &world._components;
@@ -187,7 +204,9 @@ pub const _Components = struct {
     entity_mask: [componentCount()]std.StaticBitSet(CHUNK_SIZE), //Owns at least one component of type
     chunk: usize,
 
-    pub inline fn count(ctx: *_Components) u32 {
+    pub fn count(ctx: *_Components) u32 {
+        @setRuntimeSafety(SAFETY);
+
         //count of all living components
 
         return ctx.alive;
@@ -195,6 +214,8 @@ pub const _Components = struct {
 
     //don't inline to avoid branch quota issues
     pub fn create(ctx: *_Components, comptime comp_type: type) !*Component {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         if(ctx.alive > CHUNK_SIZE)
@@ -273,6 +294,8 @@ pub const World = struct {
     arena: Arena,
 
     pub fn create() !*World {
+        @setRuntimeSafety(SAFETY);
+
         var arena = try Arena.init();
         var allocator = arena.allocator();
         var world = allocator.create(World) catch unreachable;
@@ -335,7 +358,9 @@ const Component = struct {
     alive: bool = false,
     type_node: std.TailQueue(*Component).Node,
 
-    pub inline fn is(self: *const Component, comp_type: anytype) bool {
+    pub fn is(self: *const Component, comp_type: anytype) bool {
+        @setRuntimeSafety(SAFETY);
+
         if(self.typeId == typeToId(comp_type)) {
             return true;
         } else {
@@ -343,7 +368,9 @@ const Component = struct {
         }
     }
 
-    pub inline fn set(component: *Component, comptime comp_type: type, members: anytype) !void {
+    pub fn set(component: *Component, comptime comp_type: type, members: anytype) !void {
+        @setRuntimeSafety(SAFETY);
+
         var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data));
         inline for (std.meta.fields(@TypeOf(members))) |sets| {
             @field(field_ptr, sets.name) = @field(members, sets.name);
@@ -351,14 +378,17 @@ const Component = struct {
     }
 
     //Detaches from all entities
-    pub inline fn detach(self: *Component) void {
+    pub fn detach(self: *Component) void {
+        @setRuntimeSafety(SAFETY);
 
         //TODO: Entities mask TBD
         self.attached = false;
         self.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
     }
 
-    pub inline fn destroy(self: *Component) void {
+    pub fn destroy(self: *Component) void {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
 
         //TODO: Destroy data? If allocated just hold to reuse.
@@ -388,14 +418,18 @@ pub const Entity = struct {
     type_components: [componentCount()]std.TailQueue(*Component),
     type_entities: [componentCount()]std.TailQueue(*Entity),
 
-    pub inline fn addComponent(ctx: *Entity, comptime comp_type: type, comp_val: anytype) !*Component {
+    pub fn addComponent(ctx: *Entity, comptime comp_type: type, comp_val: anytype) !*Component {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
         var component = try world.components.create(comp_type);
         try ctx.attach(component, comp_val);
         return component;
     }
 
-    pub inline fn getOneComponent(ctx: *Entity, comptime comp_type: type) ?*Component {
+    pub fn getOneComponent(ctx: *Entity, comptime comp_type: type) ?*Component {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
         var it = world.components.iteratorFilterByEntity(ctx, comp_type);
         var next = it.next();
@@ -404,6 +438,8 @@ pub const Entity = struct {
 
     //inlining this causes compiler issues
     pub fn attach(self: *Entity, component: *Component, comp_type: anytype) !void {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), component.world));
 
         if(@sizeOf(@TypeOf(comp_type)) > 0) {
@@ -437,14 +473,18 @@ pub const Entity = struct {
         self.type_components[@intCast(usize, component.typeId.?)].append(&component.type_node);
     }
 
-    pub inline fn detach(self: *Entity, component: *Component) !void {
+    pub fn detach(self: *Entity, component: *Component) !void {
+        @setRuntimeSafety(SAFETY);
+
         component.attached = false;
         component.owner = null;
         component.owners.setValue(self.id, false);
         self.world._entities[self.chunk].component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, false);
     }
 
-    pub inline fn destroy(self: *Entity) void {
+    pub fn destroy(self: *Entity) void {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
 
         self.alive = false;
@@ -454,7 +494,9 @@ pub const Entity = struct {
         world.entities.alive -= 1;
     }
 
-    pub inline fn set(self: *Entity, component: *Component, comptime comp_type: type, members: anytype) !void {
+    pub fn set(self: *Entity, component: *Component, comptime comp_type: type, members: anytype) !void {
+        @setRuntimeSafety(SAFETY);
+
         var field_ptr = @ptrCast(*comp_type, @alignCast(@alignOf(comp_type), component.data));
         inline for (std.meta.fields(@TypeOf(members))) |sets| {
             @field(field_ptr, sets.name) = @field(members, sets.name);
@@ -465,6 +507,8 @@ pub const Entity = struct {
 
 //Do not inline
 pub fn typeToId(comptime T: type) u32 {
+    @setRuntimeSafety(SAFETY);
+
     var longId = @intCast(u32, @ptrToInt(&struct { var x: u8 = 0; }.x));
 
     var found = false;
@@ -483,8 +527,10 @@ pub fn typeToId(comptime T: type) u32 {
     return  @intCast(u32, i);
 }
 
-pub inline fn componentCount() usize {
+pub fn componentCount() usize {
+    @setRuntimeSafety(SAFETY);
     @setEvalBranchQuota(CHUNK_SIZE * 2);
+
     var idx: u32 = 0;
     inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
         const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
@@ -500,21 +546,27 @@ pub inline fn componentCount() usize {
     return idx;
 }
 
-pub inline fn Cast(comptime T: type, component: ?*Component) *T {
-        var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.?.data));
-        return field_ptr;
+pub fn Cast(comptime T: type, component: ?*Component) *T {
+    @setRuntimeSafety(SAFETY);
+
+    var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component.?.data));
+    return field_ptr;
 }
 
-pub inline fn CastData(comptime T: type, component: ?*anyopaque) *T {
-        var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component));
-        return field_ptr;
+pub fn CastData(comptime T: type, component: ?*anyopaque) *T {
+    @setRuntimeSafety(SAFETY);
+
+    var field_ptr = @ptrCast(*T, @alignCast(@alignOf(T), component));
+    return field_ptr;
 }
 
 pub const SuperEntities = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     alive: usize,
 
-    pub inline fn count(ctx: *SuperEntities) u32 {
+    pub fn count(ctx: *SuperEntities) u32 {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         var i: usize = 0;
@@ -526,6 +578,8 @@ pub const SuperEntities = struct {
     }
 
     pub fn create(ctx: *SuperEntities) !*Entity {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         defer ctx.alive += 1;
@@ -539,6 +593,8 @@ pub const SuperEntities = struct {
     }
 
     pub fn expand(ctx: *SuperEntities) !void {
+        @setRuntimeSafety(SAFETY);
+        
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         world._entities = try world.allocator.realloc(world._entities, world.entities_len + 1);
@@ -563,7 +619,9 @@ pub const SuperEntities = struct {
         index: usize = 0,
         alive: usize = 0,
 
-        pub inline fn next(it: *Iterator) ?*Entity {
+        pub fn next(it: *Iterator) ?*Entity {
+            @setRuntimeSafety(SAFETY);
+
             while (it.index < it.alive) : (it.index += 1) {
                 var mod = it.index / CHUNK_SIZE;
                 var rem = @rem(it.index, CHUNK_SIZE);
@@ -587,6 +645,8 @@ pub const SuperEntities = struct {
         world: *World,
 
         pub fn next(it: *MaskedIterator) ?*Entity {
+            @setRuntimeSafety(SAFETY);
+
             while (it.index < it.alive) : (it.index += 1) {
                 var mod = it.index / CHUNK_SIZE;
                 var rem = @rem(it.index, CHUNK_SIZE);
@@ -601,13 +661,17 @@ pub const SuperEntities = struct {
         }
     };
 
-    pub inline fn iterator(ctx: *SuperEntities) SuperEntities.Iterator {
+    pub fn iterator(ctx: *SuperEntities) SuperEntities.Iterator {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
         var entities = &world._entities;
         return .{ .ctx = entities, .alive = ctx.alive};
     }
 
     pub fn iteratorFilter(ctx: *SuperEntities, comptime comp_type: type) SuperEntities.MaskedIterator {
+        @setRuntimeSafety(SAFETY);
+
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
         var entities = &world._entities;
 
@@ -629,7 +693,9 @@ const Entities = struct {
     created: u32 = 0,
     component_mask: [componentCount()]std.StaticBitSet(CHUNK_SIZE),
 
-    pub inline fn create(ctx: *Entities) !*Entity {
+    pub fn create(ctx: *Entities) !*Entity {
+        @setRuntimeSafety(SAFETY);
+
         //most ECS cheat here and don't allocate memory until a component is assigned
 
         //find end of sparse array
@@ -666,7 +732,8 @@ const Entities = struct {
         return entity;
     }
 
-    pub inline fn count(ctx: *Entities) u32 {
+    pub fn count(ctx: *Entities) u32 {
+        @setRuntimeSafety(SAFETY);
         //count of all living entities
         return ctx.alive;
     }
@@ -674,6 +741,8 @@ const Entities = struct {
 
 pub const Systems = struct {
     pub fn run(comptime f: anytype, args: anytype) !void {
+        @setRuntimeSafety(SAFETY);
+
         const ret = @call(.{}, f, args);
         if (@typeInfo(@TypeOf(ret)) == .ErrorUnion) try ret;
     }

@@ -1,9 +1,10 @@
 const std = @import("std");
-const Arena = @import("./mimalloc_arena.zig").Arena;
 
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
 const CHUNK_SIZE = 128; //Only operate on one chunk at a time
 const SAFETY = false; //Runtime safety ~50% faster
+
+const allocator = std.heap.c_allocator;
 
 //No chunk should know of another chunk
 //Modulo ID/CHUNK
@@ -291,17 +292,13 @@ pub const World = struct {
 
     systems: Systems,
     allocator: std.mem.Allocator,
-    arena: Arena,
 
     pub fn create() !*World {
         @setRuntimeSafety(SAFETY);
 
-        var arena = try Arena.init();
-        var allocator = arena.allocator();
         var world = allocator.create(World) catch unreachable;
 
         world.allocator = allocator;
-        world.arena = arena;
         world.entities.world = world;
         world.components.world = world;
         
@@ -340,7 +337,6 @@ pub const World = struct {
     }
 
     pub fn destroy(self: *World) void {
-        self.arena.deinit();
         self.allocator.destroy(self);
     }
 

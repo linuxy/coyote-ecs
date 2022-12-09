@@ -9,7 +9,6 @@ pub fn build(b: *std.build.Builder) void {
 
     const exe = b.addExecutable("ecs", "examples/fruits.zig");
     exe.setBuildMode(mode);
-    exe.use_stage1 = true;
     exe.linkLibC();
     exe.addPackage(ecsPkg);
     exe.addLibraryPath("vendor/mimalloc");

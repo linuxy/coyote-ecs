@@ -242,7 +242,6 @@ pub const _Components = struct {
         component.type_node = .{.data = component};
         component.chunk = ctx.chunk;
 
-        std.log.info("Created: {}", .{ctx.created});
         ctx.free_idx += 1;
         ctx.created += 1;
         ctx.alive += 1;

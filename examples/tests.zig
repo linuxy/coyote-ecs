@@ -76,7 +76,7 @@ pub fn tests_component_create(world: *World) !void {
     var i: usize = 0;
     while(i < NUM) : (i += 1) {
         var anEntity = try world.entities.create();
-        _ = try anEntity.addComponent(Components.Pear, Components.Pear{.color = 1, .ripe = false, .harvested = false});
+        _ = try anEntity.addComponent(Components.Pear{.color = 1, .ripe = false, .harvested = false});
     }
 }
 

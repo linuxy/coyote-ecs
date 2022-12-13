@@ -386,9 +386,9 @@ pub const Entity = struct {
     type_components: [componentCount()]std.TailQueue(*Component),
     type_entities: [componentCount()]std.TailQueue(*Entity),
 
-    pub inline fn addComponent(ctx: *Entity, comptime comp_type: type, comp_val: anytype) !*Component {
+    pub inline fn addComponent(ctx: *Entity, comp_val: anytype) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
-        var component = try world.components.create(comp_type);
+        var component = try world.components.create(@TypeOf(comp_val));
         try ctx.attach(component, comp_val);
         return component;
     }

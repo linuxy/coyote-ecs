@@ -67,7 +67,7 @@ pub fn main() !void {
     //Attach and assign a component. Do not use an anonymous struct.
     try anOrange.attach(orangeComponent, Components.Orange{.color = 0, .ripe = false, .harvested = false});
     try anApple.attach(appleComponent, Components.Apple{.color = 0, .ripe = false, .harvested = false});
-    _ = try aPear.addComponent(Components.Pear, Components.Pear{.color = 1, .ripe = false, .harvested = false});
+    _ = try aPear.addComponent(Components.Pear{.color = 1, .ripe = false, .harvested = false});
 
     //Create 50k entities and attach 50k unique components
     var i: usize = 0;

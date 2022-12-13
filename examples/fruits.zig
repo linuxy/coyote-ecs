@@ -72,7 +72,7 @@ pub fn main() !void {
 
     std.log.info("Apple entities: {}", .{i});
 
-    _ = try aPear.addComponent(Components.Pear, Components.Pear{.color = 1, .ripe = false, .harvested = false});
+    _ = try aPear.addComponent(Components.Pear{.color = 1, .ripe = false, .harvested = false});
 
     if(aPear.getOneComponent(Components.Pear) != null)
         std.log.info("Pear entities: >= 1", .{})

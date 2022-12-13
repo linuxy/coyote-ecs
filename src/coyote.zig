@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
-const CHUNK_SIZE = 128; //Only operate on one chunk at a time
+const CHUNK_SIZE = 256; //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
 const allocator = std.heap.c_allocator;
@@ -40,11 +40,11 @@ pub const SuperComponents = struct {
         }
 
         if(world._components[free].alive < CHUNK_SIZE) {
-            var component: *Component = try world._components[free].create(comp_type);
+            var component = try world._components[free].create(comp_type);
             return component;
         } else {
             try ctx.expand();
-            var component: *Component = try world._components[world.components_len - 1].create(comp_type);
+            var component = try world._components[world.components_len - 1].create(comp_type);
             return component;
         }
     }
@@ -58,6 +58,7 @@ pub const SuperComponents = struct {
         world._components[world.components_len].len = 0;
         world._components[world.components_len].alive = 0;
         world._components[world.components_len].free_idx = 0;
+        world._components[world.components_len].created = 0;
         world._components[world.components_len].chunk = world.components_len;
         world._components[world.components_len].sparse = try world.allocator.alloc(Component, CHUNK_SIZE);
 
@@ -241,6 +242,7 @@ pub const _Components = struct {
         component.type_node = .{.data = component};
         component.chunk = ctx.chunk;
 
+        std.log.info("Created: {}", .{ctx.created});
         ctx.free_idx += 1;
         ctx.created += 1;
         ctx.alive += 1;
@@ -544,6 +546,7 @@ pub const SuperEntities = struct {
         world._entities[world.entities_len].world = world;
         world._entities[world.entities_len].len = 0;
         world._entities[world.entities_len].alive = 0;
+        world._entities[world.entities_len].created = 0;
         world._entities[world.entities_len].free_idx = 0;
         world._entities[world.entities_len].sparse = try world.allocator.alloc(Entity, CHUNK_SIZE);
 

@@ -2,6 +2,7 @@ const std = @import("std");
 
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
 const CHUNK_SIZE = 128; //Only operate on one chunk at a time
+const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
 const allocator = std.heap.c_allocator;
 
@@ -330,6 +331,7 @@ const Component = struct {
     allocated: bool = false,
     alive: bool = false,
     type_node: std.TailQueue(*Component).Node,
+    magic: usize = MAGIC,
 
     pub inline fn is(self: *const Component, comp_type: anytype) bool {
         if(self.typeId == typeToId(comp_type)) {
@@ -358,11 +360,11 @@ const Component = struct {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
 
         //TODO: Destroy data? If allocated just hold to reuse.
-        if(self.alive) {
+        if(self.alive and self.magic == MAGIC) {
             self.attached = false;
             self.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
             self.alive = false;
-            
+
             if(world._components[self.chunk].alive > 0)
                 world._components[self.chunk].alive -= 1;
 

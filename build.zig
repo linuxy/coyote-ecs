@@ -23,6 +23,17 @@ pub fn build(b: *std.build.Builder) void {
 
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
+
+    const main_tests = b.addExecutable("tests", "examples/tests.zig");
+    main_tests.setBuildMode(mode);
+    main_tests.linkLibC();
+    main_tests.addLibraryPath("vendor/mimalloc");
+    main_tests.linkSystemLibrary("mimalloc");
+    main_tests.addPackage(ecsPkg);
+    main_tests.install();
+
+    const test_step = b.step("tests", "Run library tests");
+    test_step.dependOn(&main_tests.step);
 }
 
 fn build_mimalloc(b: *std.build.Builder) *std.build.RunStep {

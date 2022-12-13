@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
-const CHUNK_SIZE = 256; //Only operate on one chunk at a time
+const CHUNK_SIZE = 128; //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
 const allocator = std.heap.c_allocator;

@@ -2,7 +2,7 @@ const std = @import("std");
 
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
 const CHUNK_SIZE = 128; //Only operate on one chunk at a time
-const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
+pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
 const allocator = std.heap.c_allocator;
 
@@ -224,7 +224,8 @@ pub const _Components = struct {
 
         component.world = world;
         component.attached = false;
-
+        component.magic = MAGIC;
+        
         //Optimize: Match free indexes to like components
         //TODO: Store alignment for raw free?
         //if(component.allocated and component.typeId != null and component.typeId != typeToId(comp_type))

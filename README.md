@@ -6,7 +6,6 @@ Builds against zig 0.11.0+
 ```git clone --recursive https://github.com/linuxy/coyote-ecs.git```
 
 To build:
-* zig build mimalloc
 * zig build
 
 A more complete example:

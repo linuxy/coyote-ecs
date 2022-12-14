@@ -1,10 +1,13 @@
 const std = @import("std");
 
+const rpmalloc = @import("rpmalloc");
+const Rp = @import("rpmalloc").RPMalloc(.{});
+
 const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
 const CHUNK_SIZE = 128; //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
-const allocator = std.heap.c_allocator;
+const allocator = Rp.allocator();
 
 //No chunk should know of another chunk
 //Modulo ID/CHUNK
@@ -276,6 +279,7 @@ pub const World = struct {
     allocator: std.mem.Allocator,
 
     pub fn create() !*World {
+        try Rp.init(null, .{});
         var world = allocator.create(World) catch unreachable;
 
         world.allocator = allocator;

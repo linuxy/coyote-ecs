@@ -40,7 +40,7 @@ pub fn main() !void {
     try elapsed(tests_component_create, .{world});
     std.debug.print("Iterating {} components ... ", .{NUM});
     try elapsed(tests_component_iterate, .{world});
-    std.debug.print("Destroying {} components ... ", .{NUM});
+    std.debug.print("Destroying and deallocating {} components ... ", .{NUM});
     try elapsed(tests_component_destroy, .{world});
     std.debug.print("Destroying {} entities ... ", .{NUM});
     try elapsed(tests_entity_destroy, .{world});
@@ -94,6 +94,7 @@ pub fn tests_component_destroy(world: *World) !void {
     while(it.next()) |component| {
         component.destroy();
     }
+    try world.components.gc();
 }
 
 pub fn elapsed(comptime f: anytype, args: anytype) !void {

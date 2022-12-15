@@ -133,6 +133,7 @@ pub fn Harvest(world: *World) void {
         component.destroy();
     }
     
+    world.components.gc();
     std.log.info("Fruits harvested: {}", .{i});
 }
 

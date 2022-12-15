@@ -94,7 +94,7 @@ pub fn tests_component_destroy(world: *World) !void {
     while(it.next()) |component| {
         component.destroy();
     }
-    try world.components.gc();
+    world.components.gc();
 }
 
 pub fn elapsed(comptime f: anytype, args: anytype) !void {

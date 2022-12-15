@@ -77,7 +77,7 @@ pub const SuperComponents = struct {
         components_idx = world.components_free_idx;
     }
 
-    pub fn gc(ctx: *SuperComponents) !void {
+    pub fn gc(ctx: *SuperComponents) void {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
         var i: usize = 0;
         var j: usize = 0;
@@ -337,7 +337,11 @@ pub const World = struct {
     }
 
     pub fn destroy(self: *World) void {
-        try self.components.gc();
+        var it = self.components.iterator();
+        while(it.next()) |component|
+            component.destroy();
+
+        self.components.gc();
         var i: usize = 0;
         while(i < self.components_len) : (i += 1)
             self.allocator.free(self._components[i].sparse);
@@ -393,8 +397,9 @@ const Component = struct {
     pub inline fn dealloc(self: *Component) void {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
 
-        if(!self.alive and self.magic == MAGIC) {
+        if(!self.alive and self.magic == MAGIC and self.allocated) {
             opaqueDestroy(world.allocator, self.data.?, types_size[@intCast(usize, self.typeId.?)], types_align[@intCast(usize, self.typeId.?)]);
+            self.allocated = false;
         }
     }
 
@@ -455,8 +460,18 @@ pub const Entity = struct {
                 var oref = @ptrCast(?*anyopaque, data);
                 component.data = oref;
             } else {
-                var data = CastData(@TypeOf(comp_type), component.data);
-                data.* = comp_type;
+                if(component.allocated and component.typeId == typeToId(@TypeOf(comp_type))) {
+                    var data = CastData(@TypeOf(comp_type), component.data);
+                    data.* = comp_type;
+                } else {
+                    if(component.allocated and component.typeId != typeToId(@TypeOf(comp_type))) {
+                        opaqueDestroy(world.allocator, component.data, types_size[@intCast(usize, typeToId(@TypeOf(comp_type)))], types_align[@intCast(usize, typeToId(@TypeOf(comp_type)))]);
+                        var data = try world.allocator.create(@TypeOf(comp_type));
+                        data.* = comp_type;
+                        var oref = @ptrCast(?*anyopaque, data);
+                        component.data = oref;
+                    }
+                }
             }
         }
         component.attached = true;

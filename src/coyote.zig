@@ -7,7 +7,8 @@ const COMPONENT_CONTAINER = "Components"; //Struct containing component definiti
 const CHUNK_SIZE = 128; //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
-const allocator = Rp.allocator();
+const allocator = std.heap.c_allocator;
+//const allocator = Rp.allocator();
 
 //No chunk should know of another chunk
 //Modulo ID/CHUNK
@@ -74,6 +75,20 @@ pub const SuperComponents = struct {
         world.components_free_idx = world.components_len - 1;
 
         components_idx = world.components_free_idx;
+    }
+
+    pub fn gc(ctx: *SuperComponents) !void {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+        var i: usize = 0;
+        var j: usize = 0;
+        while(i < world.components_len) : (i += 1) {
+            while(j < CHUNK_SIZE) : (j += 1) {
+                if(world._components[i].sparse[j].allocated and !world._components[i].sparse[j].alive) {
+                    world._components[i].sparse[j].dealloc();
+                }
+            }
+            j = 0;
+        }
     }
 
     pub const Iterator = struct {
@@ -231,9 +246,8 @@ pub const _Components = struct {
         component.magic = MAGIC;
         
         //Optimize: Match free indexes to like components
-        //TODO: Store alignment for raw free?
-        //if(component.allocated and component.typeId != null and component.typeId != typeToId(comp_type))
-        //    world.allocator.destroy(component.data.?);
+        if(component.allocated and component.typeId != null and component.typeId != typeToId(comp_type))
+            opaqueDestroy(world.allocator, component.data.?, types_size[typeToId(comp_type)], types_align[typeToId(comp_type)]);
 
         if(component.typeId != typeToId(comp_type))
             component.allocated = false;
@@ -258,6 +272,8 @@ pub const _Components = struct {
 
 //Global
 var types: [componentCount()]u32 = undefined;
+var types_size: [componentCount()]usize = undefined;
+var types_align: [componentCount()]u8 = undefined;
 var type_idx: usize = 0;
 
 //TLS
@@ -321,6 +337,18 @@ pub const World = struct {
     }
 
     pub fn destroy(self: *World) void {
+        try self.components.gc();
+        var i: usize = 0;
+        while(i < self.components_len) : (i += 1)
+            self.allocator.free(self._components[i].sparse);
+
+        self.allocator.free(self._components);
+
+        i = 0;
+        while(i < self.entities_len) : (i += 1)
+            self.allocator.free(self._entities[i].sparse);
+        
+        self.allocator.free(self._entities);
         self.allocator.destroy(self);
     }
 
@@ -360,6 +388,14 @@ const Component = struct {
         //TODO: Entities mask TBD
         self.attached = false;
         self.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
+    }
+
+    pub inline fn dealloc(self: *Component) void {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
+
+        if(!self.alive and self.magic == MAGIC) {
+            opaqueDestroy(world.allocator, self.data.?, types_size[@intCast(usize, self.typeId.?)], types_align[@intCast(usize, self.typeId.?)]);
+        }
     }
 
     pub inline fn destroy(self: *Component) void {
@@ -481,9 +517,10 @@ pub fn typeToId(comptime T: type) u32 {
     }
     if(!found) {
         types[type_idx] = longId;
+        types_size[type_idx] = @sizeOf(T);
+        types_align[type_idx] = @alignOf(T);
         type_idx += 1;
     }
-    _ = T;
     return  @intCast(u32, i);
 }
 
@@ -683,3 +720,8 @@ pub const Systems = struct {
         if (@typeInfo(@TypeOf(ret)) == .ErrorUnion) try ret;
     }
 };
+
+pub fn opaqueDestroy(self: std.mem.Allocator, ptr: anytype, sz: usize, alignment: u8) void {
+    const non_const_ptr = @intToPtr([*]u8, @ptrToInt(ptr));
+    self.rawFree(non_const_ptr[0..sz], std.math.log2(alignment), @returnAddress());
+}

@@ -731,7 +731,7 @@ const Entities = struct {
 
 pub const Systems = struct {
     pub fn run(comptime f: anytype, args: anytype) !void {
-        const ret = @call(.{}, f, args);
+        const ret = @call(.auto, f, args);
         if (@typeInfo(@TypeOf(ret)) == .ErrorUnion) try ret;
     }
 };

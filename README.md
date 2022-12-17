@@ -1,7 +1,7 @@
 # coyote-ecs
 A fast and simple zig native ECS.
 
-Builds against zig 0.11.0+
+Builds against zig 0.11.0-dev.848+90477e5c1+
 
 ```git clone --recursive https://github.com/linuxy/coyote-ecs.git```
 

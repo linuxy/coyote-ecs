@@ -1,3 +1,3 @@
 [submodule "vendor/rpmalloc-zig-port"]
 	path = vendor/rpmalloc-zig-port
-	url = https://github.com/linuxy/rpmalloc-zig-port.git
+	url = https://github.com/InKryption/rpmalloc-zig-port.git

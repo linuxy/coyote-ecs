@@ -99,7 +99,7 @@ pub fn tests_component_destroy(world: *World) !void {
 
 pub fn elapsed(comptime f: anytype, args: anytype) !void {
     var then = std.time.milliTimestamp();
-    const ret = @call(.{}, f, args);
+    const ret = @call(.auto, f, args);
     if (@typeInfo(@TypeOf(ret)) == .ErrorUnion) try ret;
     std.debug.print("completed in {}ms.\n", .{std.time.milliTimestamp() - then});
 }

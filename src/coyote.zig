@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const rpmalloc = @import("rpmalloc");
 const Rp = @import("rpmalloc").RPMalloc(.{});
@@ -7,8 +8,7 @@ const COMPONENT_CONTAINER = "Components"; //Struct containing component definiti
 const CHUNK_SIZE = 128; //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
-//const allocator = std.heap.c_allocator;
-const allocator = Rp.allocator();
+const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else Rp.allocator;
 
 //No chunk should know of another chunk
 //Modulo ID/CHUNK
@@ -271,7 +271,7 @@ pub const _Components = struct {
 };
 
 //Global
-var types: [componentCount()]u32 = undefined;
+var types: [componentCount()]usize = undefined;
 var types_size: [componentCount()]usize = undefined;
 var types_align: [componentCount()]u8 = undefined;
 var type_idx: usize = 0;
@@ -295,7 +295,9 @@ pub const World = struct {
     allocator: std.mem.Allocator,
 
     pub fn create() !*World {
-        try Rp.init(null, .{});
+        if(builtin.os.tag != .windows)
+            try Rp.init(null, .{});
+
         var world = allocator.create(World) catch unreachable;
 
         world.allocator = allocator;
@@ -520,7 +522,7 @@ pub const Entity = struct {
 
 //Do not inline
 pub fn typeToId(comptime T: type) u32 {
-    var longId = @intCast(u32, @ptrToInt(&struct { var x: u8 = 0; }.x));
+    var longId = @intCast(usize, @ptrToInt(&struct { var x: u8 = 0; }.x));
 
     var found = false;
     var i: usize = 0;

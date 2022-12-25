@@ -8,7 +8,7 @@ const COMPONENT_CONTAINER = "Components"; //Struct containing component definiti
 const CHUNK_SIZE = 128; //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
-const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else Rp.allocator;
+const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else Rp.allocator();
 
 //No chunk should know of another chunk
 //Modulo ID/CHUNK

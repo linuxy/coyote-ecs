@@ -1,16 +1,25 @@
 const std = @import("std");
 
 pub fn build(b: *std.build.Builder) void {
-    const mode = b.standardReleaseOptions();
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
 
-    const rpmPkg = std.build.Pkg{ .name = "rpmalloc", .source = std.build.FileSource{ .path = "vendor/rpmalloc-zig-port/src/rpmalloc.zig"}};
-    const ecsPkg = std.build.Pkg{ .name = "coyote-ecs", .source = std.build.FileSource{ .path = "src/coyote.zig" }, .dependencies = &[_]std.build.Pkg{ rpmPkg }};
+    const exe = b.addExecutable(.{
+        .root_source_file = .{ .path = "examples/fruits.zig"},
+        .optimize = optimize,
+        .target = target,
+        .name = "ecs",
+    });
 
-    const exe = b.addExecutable("ecs", "examples/fruits.zig");
-    exe.setBuildMode(mode);
+    exe.addAnonymousModule("rpmalloc", .{ 
+        .source_file = .{ .path = "vendor/rpmalloc-zig-port/src/rpmalloc.zig" },
+    });
+
+    exe.addAnonymousModule("coyote-ecs", .{ 
+        .source_file = .{ .path = "src/coyote.zig" },
+    });
+
     exe.linkLibC();
-    exe.addPackage(ecsPkg);
-    exe.addPackage(rpmPkg);
     exe.install();
 
     const run_cmd = exe.run();
@@ -19,11 +28,20 @@ pub fn build(b: *std.build.Builder) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const main_tests = b.addExecutable("tests", "examples/tests.zig");
-    main_tests.setBuildMode(mode);
+    const main_tests = b.addExecutable(.{
+        .root_source_file = .{ .path = "examples/tests.zig"},
+        .optimize = optimize,
+        .target = target,
+        .name = "tests",
+    });
     main_tests.linkLibC();
-    main_tests.addPackage(ecsPkg);
-    main_tests.addPackage(rpmPkg);
+    main_tests.addAnonymousModule("rpmalloc", .{ 
+        .source_file = .{ .path = "vendor/rpmalloc-zig-port/src/rpmalloc.zig" },
+    });
+
+    main_tests.addAnonymousModule("coyote-ecs", .{
+        .source_file = .{ .path = "src/coyote.zig" },
+    });
     main_tests.install();
 
     const test_step = b.step("tests", "Run library tests");

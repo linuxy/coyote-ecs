@@ -13,6 +13,8 @@ const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else Rp.al
 //No chunk should know of another chunk
 //Modulo ID/CHUNK
 
+//TODO: Strip out componentCount() features
+
 //SuperComponents map component chunks to current layout
 pub const SuperComponents = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
@@ -360,7 +362,7 @@ pub const World = struct {
 
 };
 
-const Component = struct {
+pub const Component = struct {
     chunk: usize,
     id: u32,
     data: ?*anyopaque,
@@ -432,8 +434,6 @@ pub const Entity = struct {
     alive: bool,
     world: ?*anyopaque,
     allocated: bool = false,
-    type_components: [componentCount()]std.TailQueue(*Component),
-    type_entities: [componentCount()]std.TailQueue(*Entity),
 
     pub inline fn addComponent(ctx: *Entity, comp_val: anytype) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
@@ -482,16 +482,6 @@ pub const Entity = struct {
         world._entities[self.chunk].component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
         world._components[component.chunk].entity_mask[@intCast(usize, component.typeId.?)].setValue(self.id, true);
         component.owners.setValue(self.id, true);
-
-        //Link entity by component type
-        var i: usize = 0;
-        while(i < componentCount()) : (i += 1) {
-            var queue = std.TailQueue(*Entity){};
-            self.type_entities[i] = queue;
-        }
-
-        //Append to the linked list of components
-        self.type_components[@intCast(usize, component.typeId.?)].append(&component.type_node);
     }
 
     pub inline fn detach(self: *Entity, component: *Component) !void {
@@ -712,12 +702,6 @@ const Entities = struct {
         entity.alive = true;
         entity.world = ctx.world;
         entity.chunk = entities_idx;
-        
-        var i: usize = 0;
-        while(i < componentCount()) : (i += 1) {
-            var queue = std.TailQueue(*Component){};
-            entity.type_components[i] = queue;
-        }
 
         ctx.alive += 1;
         ctx.free_idx += 1;

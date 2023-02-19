@@ -4,8 +4,8 @@ const builtin = @import("builtin");
 const rpmalloc = @import("rpmalloc");
 const Rp = @import("rpmalloc").RPMalloc(.{});
 
-const MAX_COMPONENTS = 128; //Maximum number component
-const CHUNK_SIZE = 128; //Only operate on one chunk at a time
+const MAX_COMPONENTS = 12;     //Maximum number of component types, 10x runs 10x slower O(n) TODO: Fix
+const CHUNK_SIZE = 128;        //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
 const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else Rp.allocator();
@@ -17,7 +17,7 @@ const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else Rp.al
 
 pub const c_type = struct {
     id: usize,
-    sizeof: usize,
+    size: usize,
     alignof: u8,
     name: []u8,
 };
@@ -662,7 +662,7 @@ pub fn typeToIdC(comp_type: *c_type) u32 {
     }
     if(!found) {
         types[type_idx] = longId;
-        types_size[type_idx] = comp_type.sizeof;
+        types_size[type_idx] = comp_type.size;
         types_align[type_idx] = comp_type.alignof;
         type_idx += 1;
     }

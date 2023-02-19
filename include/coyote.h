@@ -7,6 +7,16 @@ extern "C" {
 
 #include <stdint.h>
 
+typedef struct coyote_type {
+    size_t id; // component unique id
+    size_t size; // component sizeof
+    const char* name; // component name
+} coyote_type;
+
+#define COYOTE_MAKE_TYPE(TypeId, TypeName) { .id = TypeId, .size = sizeof(TypeName) , .name = #TypeName }
+
+int coyote_world_create(void* out_world);
+void coyote_world_destroy(int world_addr);
 
 #ifdef __cplusplus
 }

@@ -6,9 +6,8 @@ inline fn coyote_error(err: anyerror) c_int {
     return @errorToInt(err);
 }
 
-export fn coyote_world_create(out_world: *coyote.World) c_int {
-    out_world.* = (coyote.World.create() catch |err| return coyote_error(err)).*;
-    return 0;
+export fn coyote_world_create() usize {
+    return @ptrToInt(coyote.World.create() catch return 0);
 }
 
 export fn coyote_world_destroy(world: *coyote.World) void {

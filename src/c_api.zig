@@ -2,15 +2,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const coyote = @import("coyote.zig");
 
-export fn coyote_error(err: c_int) c_int {
-    if(err != 0)
-        return 1
-    else
-        return 0;
+inline fn coyote_error(err: anyerror) c_int {
+    return @errorToInt(err);
 }
 
 export fn coyote_world_create(out_world: *coyote.World) c_int {
-    out_world.* = coyote.World.create() catch |err| return coyote_error(err);
+    out_world.* = (coyote.World.create() catch |err| return coyote_error(err)).*;
+    return 0;
 }
 
 export fn coyote_world_destroy(world: *coyote.World) void {
@@ -18,15 +16,22 @@ export fn coyote_world_destroy(world: *coyote.World) void {
 }
 
 export fn coyote_entity_create(world: *coyote.World, out_entity: *coyote.Entity) c_int {
-   out_entity.* = world.entities.create() catch |err| return coyote_error(err);
+    out_entity.* = (world.entities.create() catch |err| return coyote_error(err)).*;
+    return 0;
 }
 
 export fn coyote_entity_destroy(entity: *coyote.Entity) void {
     entity.destroy();
 }
 
-export fn coyote_component_create(world: *coyote.World, out_component: *coyote.Component) c_int {
-    out_component.* = world.components.create() catch |err| return coyote_error(err);
+//#define TYPE_ALIGNMENT( t ) offsetof( struct { char x; t test; }, test )
+//#define COYOTE_MAKE_TYPE(TypeId, TypeName) { .coy_id = TypeId, .cp_sizeof = sizeof(TypeName) , .name = #TypeName }
+//static const coy_type transform_type = { .coy_id = 0, .coy_sizeof = sizeof(transform) , .name = "transform"};
+//static const coy_type velocity_type = COYOTE_MAKE_TYPE(1, velocity);
+//varargs if this doesn't work
+export fn coyote_component_create(world: *coyote.World, out_component: *coyote.Component, type_info: *coyote.c_type) c_int {
+    out_component.* = (world.components.create_c(type_info) catch |err| return coyote_error(err)).*;
+    return 0;
 }
 
 export fn coyote_component_destroy(component: *coyote.Component) void {
@@ -48,7 +53,9 @@ export fn coyote_component_get(component: *coyote.Component) c_int {
 }
 
 export fn coyote_entity_attach(entity: *coyote.Entity, component: *coyote.Component) c_int {
-    entity.attach(component) catch |err| return coyote_error(err);
+    //entity.attach(component) catch |err| return coyote_error(err);
+    _ = entity;
+    _ = component;
     return 0;
 }
 

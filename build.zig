@@ -86,10 +86,7 @@ pub fn build(b: *std.build.Builder) void {
     
     // Dynamic C lib
     if (target.isNative()) {
-        const dynamic_lib_name = if (target.isWindows())
-            "coyote.dll"
-        else
-            "coyote";
+        const dynamic_lib_name = "coyote";
 
         const dynamic_lib = b.addSharedLibrary(.{
             .name = dynamic_lib_name,
@@ -97,6 +94,7 @@ pub fn build(b: *std.build.Builder) void {
             .target = target,
             .optimize = optimize,
         });
+        dynamic_lib.linkLibC();
         dynamic_lib.install();
         b.default_step.dependOn(&dynamic_lib.step);
 

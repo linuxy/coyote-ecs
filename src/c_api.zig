@@ -7,10 +7,12 @@ inline fn coyote_error(err: anyerror) c_int {
 }
 
 export fn coyote_world_create() usize {
-    return @ptrToInt(coyote.World.create() catch return 0);
+    var new_world = @ptrCast(?*anyopaque, coyote.World.create() catch return 0);
+    return @ptrToInt(new_world);
 }
 
-export fn coyote_world_destroy(world: *coyote.World) void {
+export fn coyote_world_destroy(world_ptr: usize) void {
+    var world = @intToPtr(*coyote.World, world_ptr);
     world.destroy();
 }
 

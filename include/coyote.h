@@ -15,8 +15,8 @@ typedef struct coyote_type {
 
 #define COYOTE_MAKE_TYPE(TypeId, TypeName) { .id = TypeId, .size = sizeof(TypeName) , .name = #TypeName }
 
-int coyote_world_create(void* out_world);
-void coyote_world_destroy(int world_addr);
+uintptr_t coyote_world_create();
+void coyote_world_destroy();
 
 #ifdef __cplusplus
 }

@@ -421,6 +421,7 @@ pub const World = struct {
             i += 1;
         }
 
+        std.log.info("Created world @ {*}", .{world});
         return world;
     }
 

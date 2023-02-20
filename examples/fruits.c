@@ -5,14 +5,14 @@
 static const coyote_type apple = COYOTE_MAKE_TYPE(0, apple);
 
 int main(void) {
-    void* world;    
-    int ret = coyote_world_create((void*)world);
+    uintptr_t world = coyote_world_create();
 
-    if(ret != 0)
-        printf("Created world of size: %d", ret);
+    if(world != 0)
+        printf("Created world of size: %d\n", world);
     else
-        printf("World creation failed.");
+        printf("World creation failed.\n");
 
-    // coyote_world_destroy(world);
+    coyote_world_destroy(world);
+    printf("World destroyed.\n");
     return 0;
 }

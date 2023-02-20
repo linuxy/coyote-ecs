@@ -16,12 +16,20 @@ export fn coyote_world_destroy(world_ptr: usize) void {
     world.destroy();
 }
 
-export fn coyote_entity_create(world: *coyote.World, out_entity: *coyote.Entity) c_int {
-    out_entity.* = (world.entities.create() catch |err| return coyote_error(err)).*;
-    return 0;
+export fn coyote_entity_create(world_ptr: usize) usize {
+    var world = @intToPtr(*coyote.World, world_ptr);
+    var entity = (world.entities.create() catch return 0);
+    return @ptrToInt(entity);
 }
 
-export fn coyote_entity_destroy(entity: *coyote.Entity) void {
+export fn coyote_entity_destroy(entity_ptr: usize) void {
+    
+    if(entity_ptr == 0) {
+        std.log.err("Invalid entity.", .{});
+        return;
+    }
+
+    var entity = @intToPtr(*coyote.Entity, entity_ptr);
     entity.destroy();
 }
 
@@ -30,9 +38,12 @@ export fn coyote_entity_destroy(entity: *coyote.Entity) void {
 //static const coy_type transform_type = { .coy_id = 0, .coy_sizeof = sizeof(transform) , .name = "transform"};
 //static const coy_type velocity_type = COYOTE_MAKE_TYPE(1, velocity);
 //varargs if this doesn't work
-export fn coyote_component_create(world: *coyote.World, out_component: *coyote.Component, type_info: *coyote.c_type) c_int {
-    out_component.* = (world.components.create_c(type_info) catch |err| return coyote_error(err)).*;
-    return 0;
+export fn coyote_component_create(world_ptr: usize, id: usize, size: usize, name: [*c]u8) usize {
+    var world = @intToPtr(*coyote.World, world_ptr);
+    var type_info: coyote.c_type = .{.id = id, .size = size, .name = name, .alignof = 8};
+    var component = world.components.create_c(type_info) catch |err| return @intCast(usize, coyote_error(err));
+
+    return @ptrToInt(component);
 }
 
 export fn coyote_component_destroy(component: *coyote.Component) void {

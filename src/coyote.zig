@@ -19,7 +19,7 @@ pub const c_type = struct {
     id: usize,
     size: usize,
     alignof: u8,
-    name: []u8,
+    name: ?[*:0]const u8,
 };
 
 pub const SuperComponents = struct {
@@ -61,7 +61,7 @@ pub const SuperComponents = struct {
         }
     }
 
-    pub fn create_c(ctx: *SuperComponents, comp_type: *c_type) !*Component {
+    pub fn create_c(ctx: *SuperComponents, comp_type: c_type) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         defer ctx.alive += 1;
@@ -300,7 +300,7 @@ pub const _Components = struct {
         return component;
     }
 
-    pub fn create_c(ctx: *_Components, comp_type: *c_type) !*Component {
+    pub fn create_c(ctx: *_Components, comp_type: c_type) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
         if(ctx.alive > CHUNK_SIZE)
@@ -444,7 +444,6 @@ pub const World = struct {
         self.allocator.free(self._entities);
         self.allocator.destroy(self);
     }
-
 };
 
 pub const Component = struct {
@@ -650,7 +649,7 @@ pub fn typeToId(comptime T: type) u32 {
     return  @intCast(u32, i);
 }
 
-pub fn typeToIdC(comp_type: *c_type) u32 {
+pub fn typeToIdC(comp_type: c_type) u32 {
     var longId = comp_type.id;
 
     var found = false;

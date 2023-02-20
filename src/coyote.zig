@@ -4,7 +4,7 @@ const builtin = @import("builtin");
 const rpmalloc = @import("rpmalloc");
 const Rp = @import("rpmalloc").RPMalloc(.{});
 
-const MAX_COMPONENTS = 12;     //Maximum number of component types, 10x runs 10x slower O(n) TODO: Fix
+const MAX_COMPONENTS = 12;     //Maximum number of component types, 10x runs 10x slower create O(n) TODO: Fix
 const CHUNK_SIZE = 128;        //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
@@ -16,10 +16,10 @@ const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else Rp.al
 //SuperComponents map component chunks to current layout
 
 pub const c_type = struct {
-    id: usize,
-    size: usize,
-    alignof: u8,
-    name: ?[*:0]const u8,
+    id: usize = 0,
+    size: usize = 0,
+    alignof: u8 = 8,
+    name: ?[*:0]const u8 = "",
 };
 
 pub const SuperComponents = struct {

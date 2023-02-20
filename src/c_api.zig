@@ -23,7 +23,7 @@ export fn coyote_entity_create(world_ptr: usize) usize {
 }
 
 export fn coyote_entity_destroy(entity_ptr: usize) void {
-    
+
     if(entity_ptr == 0) {
         std.log.err("Invalid entity.", .{});
         return;
@@ -37,7 +37,6 @@ export fn coyote_entity_destroy(entity_ptr: usize) void {
 //#define COYOTE_MAKE_TYPE(TypeId, TypeName) { .coy_id = TypeId, .cp_sizeof = sizeof(TypeName) , .name = #TypeName }
 //static const coy_type transform_type = { .coy_id = 0, .coy_sizeof = sizeof(transform) , .name = "transform"};
 //static const coy_type velocity_type = COYOTE_MAKE_TYPE(1, velocity);
-//varargs if this doesn't work
 export fn coyote_component_create(world_ptr: usize, id: usize, size: usize, name: [*c]u8) usize {
     var world = @intToPtr(*coyote.World, world_ptr);
     var type_info: coyote.c_type = .{.id = id, .size = size, .name = name, .alignof = 8};
@@ -46,38 +45,98 @@ export fn coyote_component_create(world_ptr: usize, id: usize, size: usize, name
     return @ptrToInt(component);
 }
 
-export fn coyote_component_destroy(component: *coyote.Component) void {
+export fn coyote_component_destroy(component_ptr: usize) void {
+
+    if(component_ptr == 0) {
+        std.log.err("Invalid component.", .{});
+        return;
+    }
+
+    var component = @intToPtr(*coyote.Component, component_ptr);
     component.destroy();
 }
 
-export fn coyote_components_gc(world: *coyote.World) void {
+export fn coyote_components_gc(world_ptr: usize) void {
+    var world = @intToPtr(*coyote.World, world_ptr);
     world.components.gc();
 }
 
-export fn coyote_component_set(component: *coyote.Component) c_int {
+export fn coyote_component_set(component_ptr: usize) c_int {
+
+    if(component_ptr == 0) {
+        std.log.err("Invalid component.", .{});
+        return 1;
+    }
+
+    var component = @intToPtr(*coyote.Component, component_ptr);
+    _ = component;
+
+    return 0;
+}
+
+export fn coyote_component_get(component_ptr: usize) c_int {
+
+    if(component_ptr == 0) {
+        std.log.err("Invalid component.", .{});
+        return 1;
+    }
+
+    var component = @intToPtr(*coyote.Component, component_ptr);
+
     _ = component;
     return 0;
 }
 
-export fn coyote_component_get(component: *coyote.Component) c_int {
-    _ = component;
+export fn coyote_entity_attach(entity_ptr: usize, component_ptr: usize, id: usize, size: usize, name: [*c]u8) c_int {
+    if(component_ptr == 0) {
+        std.log.err("Invalid component.", .{});
+        return 1;
+    }
+
+    var component = @intToPtr(*coyote.Component, component_ptr);
+
+    if(entity_ptr == 0) {
+        std.log.err("Invalid entity.", .{});
+        return 1;
+    }
+
+    var entity = @intToPtr(*coyote.Entity, entity_ptr);
+    var type_info: coyote.c_type = .{.id = id, .size = size, .name = name, .alignof = 8};
+
+    entity.attach(component, type_info) catch return 1;
+
     return 0;
 }
 
-export fn coyote_entity_attach(entity: *coyote.Entity, component: *coyote.Component) c_int {
-    //entity.attach(component) catch |err| return coyote_error(err);
+export fn coyote_entity_detach(entity_ptr: usize, component_ptr: usize) c_int {
+    if(component_ptr == 0) {
+        std.log.err("Invalid component.", .{});
+        return 1;
+    }
+
+    var component = @intToPtr(*coyote.Entity, component_ptr);
+
+    if(entity_ptr == 0) {
+        std.log.err("Invalid entity.", .{});
+        return 1;
+    }
+
+    var entity = @intToPtr(*coyote.Entity, entity_ptr);
+    
     _ = entity;
     _ = component;
     return 0;
 }
 
-export fn coyote_entity_detach(entity: *coyote.Entity, component: *coyote.Component) c_int {
-    entity.detach(component) catch |err| return coyote_error(err);
-    return 0;
-}
+export fn coyote_component_detach(component_ptr: usize) c_int {
+    if(component_ptr == 0) {
+        std.log.err("Invalid component.", .{});
+        return 1;
+    }
 
-export fn coyote_component_detach(component: *coyote.Component) c_int {
-    component.detach();
+    var component = @intToPtr(*coyote.Entity, component_ptr);
+    _ = component;
+    
     return 0;
 }
 

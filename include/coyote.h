@@ -8,9 +8,9 @@ extern "C" {
 #include <stdint.h>
 
 typedef struct coyote_type {
-    int id; // component unique id
-    size_t size; // component sizeof
-    const char* name; // component name
+    uintptr_t id;       // component unique id/ptr
+    size_t size;        // component sizeof
+    const char* name;   // component name
 } coyote_type;
 
 #define COYOTE_MAKE_TYPE(TypeId, TypeName) { .id = TypeId, .size = sizeof(TypeName) , .name = #TypeName }
@@ -24,6 +24,7 @@ void coyote_world_destroy();
 entity coyote_entity_create(world world);
 void coyote_entity_destroy(entity entity);
 component coyote_component_create(world world, coyote_type type);
+int coyote_entity_attach(entity entity, component component, coyote_type type);
 
 #ifdef __cplusplus
 }

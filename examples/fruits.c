@@ -14,7 +14,7 @@ int main(void) {
         printf("World creation failed.\n");
 
     entity e_apple = coyote_entity_create(world);
-    entity e_aorange = coyote_entity_create(world);
+    entity e_orange = coyote_entity_create(world);
     entity e_pear = coyote_entity_create(world);
 
     component c_orange = coyote_component_create(world, orange);

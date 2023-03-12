@@ -26,7 +26,8 @@ int main(void) {
     printf("Created an apple component @%d\n", c_apple);
 
     iterator it = coyote_components_iterator_filter(world, orange);
-    if(coyote_components_iterator_filter_next(it))
+    component next = coyote_components_iterator_filter_next(it);
+    if(next)
         printf("Another orange component @%d\n", c_orange);
     else
         printf("NOT another orange component @%d\n", c_orange);

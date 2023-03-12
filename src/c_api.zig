@@ -166,10 +166,8 @@ export fn coyote_components_iterator_filter(world_ptr: usize, c_type: coyote.c_t
 export fn coyote_components_iterator_filter_next(iterator_ptr: usize) usize {
     var iterator = @intToPtr(*coyote.SuperComponents.MaskedIterator, iterator_ptr);
     if(iterator.next()) |bind| {
-        std.log.info("Next component found @ {*}", .{bind});
         return @ptrToInt(bind);
     } else {
-        std.log.info("Next component NOT found.", .{});
         coyote.allocator.destroy(iterator);
         return 0;
     }

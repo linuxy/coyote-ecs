@@ -33,6 +33,7 @@ iterator coyote_components_iterator_filter(world world, coyote_type type);
 iterator coyote_components_entities_filter(world world, coyote_type type);
 int coyote_components_iterator_filter_next(iterator iterator);
 int coyote_entities_iterator_filter_next(iterator iterator);
+void coyote_components_gc(world world);
 
 #ifdef __cplusplus
 }

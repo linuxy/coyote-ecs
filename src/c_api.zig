@@ -32,9 +32,6 @@ export fn coyote_entity_destroy(entity_ptr: usize) void {
     var entity = @intToPtr(*coyote.Entity, entity_ptr);
     entity.destroy();
 }
-
-//#define TYPE_ALIGNMENT( t ) offsetof( struct { char x; t test; }, test )
-//#define COYOTE_MAKE_TYPE(TypeId, TypeName) { .coy_id = TypeId, .cp_sizeof = sizeof(TypeName) , .name = #TypeName }
 //static const coy_type transform_type = { .coy_id = 0, .coy_sizeof = sizeof(transform) , .name = "transform"};
 //static const coy_type velocity_type = COYOTE_MAKE_TYPE(1, velocity);
 export fn coyote_component_create(world_ptr: usize, c_type: coyote.c_type) usize {

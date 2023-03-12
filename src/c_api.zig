@@ -141,8 +141,8 @@ export fn coyote_component_detach(component_ptr: usize) c_int {
 }
 
 export fn coyote_components_iterator(world: *coyote.World, out_iterator: *coyote.SuperComponents.Iterator) c_int {
-    _ = world;
-    _ = out_iterator;
+    var it = world.components.iterator();
+    out_iterator.* = it;
     return 0;
 }
 
@@ -152,9 +152,9 @@ export fn coyote_components_iterator_filter(world: *coyote.World, out_iterator: 
     return 0;
 }
 
-export fn coyote_entities_iterator(world: *coyote.World, out_iterator: *coyote.SuperComponents.Iterator) c_int {
-    _ = world;
-    _ = out_iterator;
+export fn coyote_entities_iterator(world: *coyote.World, out_iterator: *coyote.SuperEntities.Iterator) c_int {
+    var it = world.entities.iterator();
+    out_iterator.* = it;
     return 0;
 }
 
@@ -164,7 +164,12 @@ export fn coyote_entities_iterator_filter(world: *coyote.World, out_iterator: *c
     return 0;
 }
 
-export fn coyote_component_is(component: *coyote.Component) bool {
-    _ = component;
-    return true;
+export fn coyote_component_is(component: *coyote.Component, id: usize, size: usize, name: [*c]u8) c_int {
+    if(component.typeId.? == id) {
+        return 0;
+    } else {
+        return 1;
+    }
+    _ = name;
+    _ = size;
 }

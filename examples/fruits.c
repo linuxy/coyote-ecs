@@ -23,6 +23,11 @@ int main(void) {
     printf("Created an orange component @%d\n", c_orange);
     printf("Created an apple component @%d\n", c_apple);
 
+    if(coyote_component_is(c_orange, orange))
+        printf("Component is an orange @%d\n", c_orange);
+    else
+        printf("Component is NOT an orange @%d\n", c_orange);
+
     coyote_entity_attach(e_apple, c_apple, apple);
     coyote_entity_destroy(e_apple);
     coyote_entity_destroy(e_pear);

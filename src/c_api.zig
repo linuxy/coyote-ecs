@@ -142,6 +142,16 @@ export fn coyote_components_iterator(world_ptr: usize, out_iterator: *coyote.Sup
     return 0;
 }
 
+export fn coyote_components_iterator_next(iterator_ptr: usize) usize {
+    var iterator = @intToPtr(*coyote.SuperComponents.Iterator, iterator_ptr);
+    if(iterator.next()) |bind| {
+        return @ptrToInt(bind);
+    } else {
+        coyote.allocator.destroy(iterator);
+        return 0;
+    }
+}
+
 export fn coyote_components_iterator_filter(world_ptr: usize, c_type: coyote.c_type) usize {
     var world = @intToPtr(*coyote.World, world_ptr);
     var components = &world._components;
@@ -153,11 +163,11 @@ export fn coyote_components_iterator_filter(world_ptr: usize, c_type: coyote.c_t
     return @ptrToInt(iterator);
 }
 
-export fn coyote_components_iterator_filter_next(iterator_ptr: usize) c_int {
+export fn coyote_components_iterator_filter_next(iterator_ptr: usize) usize {
     var iterator = @intToPtr(*coyote.SuperComponents.MaskedIterator, iterator_ptr);
     if(iterator.next()) |bind| {
         std.log.info("Next component found @ {*}", .{bind});
-        return 1;
+        return @ptrToInt(bind);
     } else {
         std.log.info("Next component NOT found.", .{});
         coyote.allocator.destroy(iterator);
@@ -172,6 +182,16 @@ export fn coyote_entities_iterator(world_ptr: usize, out_iterator: *coyote.Super
     return 0;
 }
 
+export fn coyote_entities_iterator_next(iterator_ptr: usize) usize {
+    var iterator = @intToPtr(*coyote.SuperEntities.Iterator, iterator_ptr);
+    if(iterator.next()) |bind| {
+        return @ptrToInt(bind);
+    } else {
+        coyote.allocator.destroy(iterator);
+        return 0;
+    }
+}
+
 export fn coyote_entities_iterator_filter(world_ptr: usize, c_type: coyote.c_type) usize {
         var world = @intToPtr(*coyote.World, world_ptr);
         var entities = &world._entities;
@@ -183,10 +203,10 @@ export fn coyote_entities_iterator_filter(world_ptr: usize, c_type: coyote.c_typ
     return @ptrToInt(iterator);
 }
 
-export fn coyote_entities_iterator_filter_next(iterator_ptr: usize) c_int {
+export fn coyote_entities_iterator_filter_next(iterator_ptr: usize) usize {
     var iterator = @intToPtr(*coyote.SuperEntities.MaskedIterator, iterator_ptr);
-    if(iterator.next() != null) {
-        return 1;
+    if(iterator.next()) |bind| {
+        return @ptrToInt(bind);
     } else {
         coyote.allocator.destroy(iterator);
         return 0;

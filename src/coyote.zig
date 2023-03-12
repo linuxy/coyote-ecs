@@ -4,11 +4,11 @@ const builtin = @import("builtin");
 const rpmalloc = @import("rpmalloc");
 const Rp = @import("rpmalloc").RPMalloc(.{});
 
-const MAX_COMPONENTS = 12;     //Maximum number of component types, 10x runs 10x slower create O(n) TODO: Fix
-const CHUNK_SIZE = 128;        //Only operate on one chunk at a time
+pub const MAX_COMPONENTS = 12;     //Maximum number of component types, 10x runs 10x slower create O(n) TODO: Fix
+pub const CHUNK_SIZE = 128;        //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
-const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else Rp.allocator();
+pub const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else Rp.allocator();
 
 //No chunk should know of another chunk
 //Modulo ID/CHUNK
@@ -421,7 +421,6 @@ pub const World = struct {
             i += 1;
         }
 
-        std.log.info("Created world @ {*}", .{world});
         return world;
     }
 

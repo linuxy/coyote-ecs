@@ -18,10 +18,18 @@ int main(void) {
     entity e_pear = coyote_entity_create(world);
 
     component c_orange = coyote_component_create(world, orange);
+    component d_orange = coyote_component_create(world, orange);
     component c_apple = coyote_component_create(world, apple);
 
     printf("Created an orange component @%d\n", c_orange);
+    printf("Created an orange component @%d\n", d_orange);
     printf("Created an apple component @%d\n", c_apple);
+
+    iterator it = coyote_components_iterator_filter(world, orange);
+    if(coyote_components_iterator_filter_next(it))
+        printf("Another orange component @%d\n", c_orange);
+    else
+        printf("NOT another orange component @%d\n", c_orange);
 
     if(coyote_component_is(c_orange, orange))
         printf("Component is an orange @%d\n", c_orange);

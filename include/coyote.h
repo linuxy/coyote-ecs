@@ -8,8 +8,8 @@ extern "C" {
 #include <stdint.h>
 
 typedef struct coyote_type {
-    uintptr_t id;       // component unique id/ptr
-    size_t size;        // component sizeof
+    uintptr_t id;
+    uintptr_t size;        // component sizeof
     const char* name;   // component name
 } coyote_type;
 

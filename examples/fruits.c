@@ -20,7 +20,7 @@ int main(void) {
     component c_orange = coyote_component_create(world, orange);
     component d_orange = coyote_component_create(world, orange);
     component c_apple = coyote_component_create(world, apple);
-
+ 
     printf("Created an orange component @%d\n", c_orange);
     printf("Created an orange component @%d\n", d_orange);
     printf("Created an apple component @%d\n", c_apple);

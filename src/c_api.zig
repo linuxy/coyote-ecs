@@ -37,10 +37,9 @@ export fn coyote_entity_destroy(entity_ptr: usize) void {
 //#define COYOTE_MAKE_TYPE(TypeId, TypeName) { .coy_id = TypeId, .cp_sizeof = sizeof(TypeName) , .name = #TypeName }
 //static const coy_type transform_type = { .coy_id = 0, .coy_sizeof = sizeof(transform) , .name = "transform"};
 //static const coy_type velocity_type = COYOTE_MAKE_TYPE(1, velocity);
-export fn coyote_component_create(world_ptr: usize, id: usize, size: usize, name: [*c]u8) usize {
+export fn coyote_component_create(world_ptr: usize, c_type: coyote.c_type) usize {
     var world = @intToPtr(*coyote.World, world_ptr);
-    var type_info: coyote.c_type = .{.id = id, .size = size, .name = name, .alignof = 8};
-    var component = world.components.create_c(type_info) catch |err| return @intCast(usize, coyote_error(err));
+    var component = world.components.create_c(c_type) catch |err| return @intCast(usize, coyote_error(err));
 
     return @ptrToInt(component);
 }
@@ -87,7 +86,7 @@ export fn coyote_component_get(component_ptr: usize) c_int {
     return 0;
 }
 
-export fn coyote_entity_attach(entity_ptr: usize, component_ptr: usize, id: usize, size: usize, name: [*c]u8) c_int {
+export fn coyote_entity_attach(entity_ptr: usize, component_ptr: usize, c_type: coyote.c_type) c_int {
     if(component_ptr == 0) {
         std.log.err("Invalid component.", .{});
         return 1;
@@ -101,9 +100,8 @@ export fn coyote_entity_attach(entity_ptr: usize, component_ptr: usize, id: usiz
     }
 
     var entity = @intToPtr(*coyote.Entity, entity_ptr);
-    var type_info: coyote.c_type = .{.id = id, .size = size, .name = name, .alignof = 8};
 
-    entity.attach(component, type_info) catch return 1;
+    entity.attach(component, c_type) catch return 1;
 
     return 0;
 }
@@ -147,12 +145,12 @@ export fn coyote_components_iterator(world_ptr: usize, out_iterator: *coyote.Sup
     return 0;
 }
 
-export fn coyote_components_iterator_filter(world_ptr: usize, id: usize, size: usize, name: [*c]u8) usize {
+export fn coyote_components_iterator_filter(world_ptr: usize, c_type: coyote.c_type) usize {
     var world = @intToPtr(*coyote.World, world_ptr);
     var components = &world._components;
     var iterator = coyote.allocator.create(coyote.SuperComponents.MaskedIterator) catch unreachable;
     iterator.* = coyote.SuperComponents.MaskedIterator{ .ctx = components,
-                .filter_type = coyote.typeToIdC(.{.id = id, .size = size, .name = name }),
+                .filter_type = coyote.typeToIdC(c_type),
                 .alive = coyote.CHUNK_SIZE * world.components_len,
                 .world = world };
     return @ptrToInt(iterator);
@@ -177,12 +175,12 @@ export fn coyote_entities_iterator(world_ptr: usize, out_iterator: *coyote.Super
     return 0;
 }
 
-export fn coyote_entities_iterator_filter(world_ptr: usize, id: usize, size: usize, name: [*c]u8) usize {
+export fn coyote_entities_iterator_filter(world_ptr: usize, c_type: coyote.c_type) usize {
         var world = @intToPtr(*coyote.World, world_ptr);
         var entities = &world._entities;
         var iterator = coyote.allocator.create(coyote.SuperEntities.MaskedIterator) catch unreachable;
         iterator.* = coyote.SuperEntities.MaskedIterator{ .ctx = entities,
-                  .filter_type = coyote.typeToIdC(.{.id = id, .size = size, .name = name }),
+                  .filter_type = coyote.typeToIdC(c_type),
                   .alive = world.entities.alive,
                   .world = world };
     return @ptrToInt(iterator);
@@ -198,12 +196,10 @@ export fn coyote_entities_iterator_filter_next(iterator_ptr: usize) c_int {
     }
 }
 
-export fn coyote_component_is(component: *coyote.Component, id: usize, size: usize, name: [*c]u8) usize {
-    if(component.typeId.? == id) {
+export fn coyote_component_is(component: *coyote.Component, c_type: coyote.c_type) usize {
+    if(component.typeId.? == c_type.id) {
         return 0;
     } else {
         return 1;
     }
-    _ = name;
-    _ = size;
 }

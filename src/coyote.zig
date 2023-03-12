@@ -15,11 +15,11 @@ pub const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else R
 
 //SuperComponents map component chunks to current layout
 
-pub const c_type = struct {
+pub const c_type = extern struct {
     id: usize = 0,
     size: usize = 0,
     alignof: u8 = 8,
-    name: ?[*:0]const u8 = "",
+    name: [*c]u8 = null,
 };
 
 pub const SuperComponents = struct {

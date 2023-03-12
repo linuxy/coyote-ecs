@@ -4,16 +4,24 @@ const builtin = @import("builtin");
 const rpmalloc = @import("rpmalloc");
 const Rp = @import("rpmalloc").RPMalloc(.{});
 
-const COMPONENT_CONTAINER = "Components"; //Struct containing component definitions
-const CHUNK_SIZE = 128; //Only operate on one chunk at a time
+pub const MAX_COMPONENTS = 12;     //Maximum number of component types, 10x runs 10x slower create O(n) TODO: Fix
+pub const CHUNK_SIZE = 128;        //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
-const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else Rp.allocator();
+pub const allocator = if(builtin.os.tag == .windows) std.heap.c_allocator else Rp.allocator();
 
 //No chunk should know of another chunk
 //Modulo ID/CHUNK
 
 //SuperComponents map component chunks to current layout
+
+pub const c_type = extern struct {
+    id: usize = 0,
+    size: usize = 0,
+    alignof: u8 = 8,
+    name: [*c]u8 = null,
+};
+
 pub const SuperComponents = struct {
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     alive: usize,
@@ -53,6 +61,30 @@ pub const SuperComponents = struct {
         }
     }
 
+    pub fn create_c(ctx: *SuperComponents, comp_type: c_type) !*Component {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        defer ctx.alive += 1;
+
+        var i: usize = 0;
+        var free: usize = 0;
+        while(i < world.components_len) : (i += 1) {
+            if(world._components[i].alive < CHUNK_SIZE) {
+                free = i;
+                break;
+            }
+        }
+
+        if(world._components[free].alive < CHUNK_SIZE) {
+            var component = try world._components[free].create_c(comp_type);
+            return component;
+        } else {
+            try ctx.expand();
+            var component = try world._components[world.components_len - 1].create_c(comp_type);
+            return component;
+        }
+    }
+
     pub fn expand(ctx: *SuperComponents) !void {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
@@ -67,7 +99,7 @@ pub const SuperComponents = struct {
         world._components[world.components_len].sparse = try world.allocator.alloc(Component, CHUNK_SIZE);
 
         var i: usize = 0;
-        while(i < componentCount()) : (i += 1) {
+        while(i < MAX_COMPONENTS) : (i += 1) {
             world._components[world.components_len].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
         }
 
@@ -205,7 +237,7 @@ pub const _Components = struct {
     sparse: []Component,
     free_idx: u32 = 0,
     created: u32 = 0,
-    entity_mask: [componentCount()]std.StaticBitSet(CHUNK_SIZE), //Owns at least one component of type
+    entity_mask: [MAX_COMPONENTS]std.StaticBitSet(CHUNK_SIZE), //Owns at least one component of type
     chunk: usize,
 
     pub inline fn count(ctx: *_Components) u32 {
@@ -214,7 +246,6 @@ pub const _Components = struct {
         return ctx.alive;
     }
 
-    //don't inline to avoid branch quota issues
     pub fn create(ctx: *_Components, comptime comp_type: type) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
 
@@ -263,17 +294,72 @@ pub const _Components = struct {
         ctx.created += 1;
         ctx.alive += 1;
 
-        if(typeToId(comp_type) > componentCount() - 1)
+        if(typeToId(comp_type) > MAX_COMPONENTS - 1)
             return error.ComponentNotInContainer;
 
         return component;
     }
+
+    pub fn create_c(ctx: *_Components, comp_type: c_type) !*Component {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
+
+        if(ctx.alive > CHUNK_SIZE)
+            return error.NoFreeComponentSlots;
+
+        if(ctx.free_idx >= CHUNK_SIZE)
+            ctx.free_idx = 0;
+
+        //find end of sparse array
+        var wrapped = false;
+        while(ctx.sparse[ctx.free_idx].alive == true) {
+            if(wrapped and ctx.free_idx > CHUNK_SIZE)
+                return error.NoFreeComponentSlots;
+
+            ctx.free_idx += 1;
+            if(ctx.free_idx >= CHUNK_SIZE) {
+                ctx.free_idx = 0;
+                wrapped = true;
+            }
+        }
+        if(!wrapped)
+            ctx.len += 1;
+
+        var component = &ctx.sparse[ctx.free_idx];
+
+        component.world = world;
+        component.attached = false;
+        component.magic = MAGIC;
+        
+        //Optimize: Match free indexes to like components
+        if(component.allocated and component.typeId != null and component.typeId != typeToIdC(comp_type))
+            opaqueDestroy(world.allocator, component.data.?, types_size[typeToIdC(comp_type)], types_align[typeToIdC(comp_type)]);
+
+        if(component.typeId != typeToIdC(comp_type))
+            component.allocated = false;
+
+        component.typeId = typeToIdC(comp_type);
+        component.id = ctx.free_idx;
+        component.alive = true;
+        component.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
+        component.type_node = .{.data = component};
+        component.chunk = ctx.chunk;
+
+        ctx.free_idx += 1;
+        ctx.created += 1;
+        ctx.alive += 1;
+
+        if(typeToIdC(comp_type) > MAX_COMPONENTS - 1)
+            return error.ComponentNotInContainer;
+
+        return component;
+    }
+
 };
 
 //Global
-var types: [componentCount()]usize = undefined;
-var types_size: [componentCount()]usize = undefined;
-var types_align: [componentCount()]u8 = undefined;
+var types: [MAX_COMPONENTS]usize = undefined;
+var types_size: [MAX_COMPONENTS]usize = undefined;
+var types_align: [MAX_COMPONENTS]u8 = undefined;
 var type_idx: usize = 0;
 
 //TLS
@@ -329,7 +415,7 @@ pub const World = struct {
         world._components[components_idx].sparse = try allocator.alloc(Component, CHUNK_SIZE);
 
         var i: usize = 0;
-        while(i < componentCount()) {
+        while(i < MAX_COMPONENTS) {
             world._entities[entities_idx].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
             world._components[components_idx].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
             i += 1;
@@ -357,10 +443,9 @@ pub const World = struct {
         self.allocator.free(self._entities);
         self.allocator.destroy(self);
     }
-
 };
 
-const Component = struct {
+pub const Component = struct {
     chunk: usize,
     id: u32,
     data: ?*anyopaque,
@@ -432,8 +517,6 @@ pub const Entity = struct {
     alive: bool,
     world: ?*anyopaque,
     allocated: bool = false,
-    type_components: [componentCount()]std.TailQueue(*Component),
-    type_entities: [componentCount()]std.TailQueue(*Entity),
 
     pub inline fn addComponent(ctx: *Entity, comp_val: anytype) !*Component {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), ctx.world));
@@ -449,7 +532,6 @@ pub const Entity = struct {
         return next;
     }
 
-    //inlining this causes compiler issues
     pub fn attach(self: *Entity, component: *Component, comp_type: anytype) !void {
         var world = @ptrCast(*World, @alignCast(@alignOf(World), component.world));
 
@@ -482,23 +564,48 @@ pub const Entity = struct {
         world._entities[self.chunk].component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
         world._components[component.chunk].entity_mask[@intCast(usize, component.typeId.?)].setValue(self.id, true);
         component.owners.setValue(self.id, true);
+    }
 
-        //Link entity by component type
-        var i: usize = 0;
-        while(i < componentCount()) : (i += 1) {
-            var queue = std.TailQueue(*Entity){};
-            self.type_entities[i] = queue;
+    pub fn attach_c(self: *Entity, component: *Component, comp_type: *c_type) !void {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), component.world));
+
+        if(@sizeOf(@TypeOf(comp_type)) > 0) {
+            var ref = @TypeOf(comp_type){};
+            ref = comp_type;
+            if(!component.allocated) {
+                var data = try world.allocator.create(@TypeOf(comp_type));
+                data.* = comp_type;
+                var oref = @ptrCast(?*anyopaque, data);
+                component.data = oref;
+            } else {
+                if(component.allocated and component.typeId == typeToId(@TypeOf(comp_type))) {
+                    var data = CastData(@TypeOf(comp_type), component.data);
+                    data.* = comp_type;
+                } else {
+                    if(component.allocated and component.typeId != typeToId(@TypeOf(comp_type))) {
+                        opaqueDestroy(world.allocator, component.data, types_size[@intCast(usize, typeToIdC(comp_type))], types_align[@intCast(usize, typeToIdC(comp_type))]);
+                        var data = try world.allocator.create(@TypeOf(comp_type));
+                        data.* = comp_type;
+                        var oref = @ptrCast(?*anyopaque, data);
+                        component.data = oref;
+                    }
+                }
+            }
         }
-
-        //Append to the linked list of components
-        self.type_components[@intCast(usize, component.typeId.?)].append(&component.type_node);
+        component.attached = true;
+        component.allocated = true;
+        
+        world._entities[self.chunk].component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, true);
+        world._components[component.chunk].entity_mask[@intCast(usize, component.typeId.?)].setValue(self.id, true);
+        component.owners.setValue(self.id, true);
     }
 
     pub inline fn detach(self: *Entity, component: *Component) !void {
+        var world = @ptrCast(*World, @alignCast(@alignOf(World), self.world));
+
         component.attached = false;
-        component.owner = null;
         component.owners.setValue(self.id, false);
-        self.world._entities[self.chunk].component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, false);
+        world._entities[self.chunk].component_mask[@intCast(usize, component.typeId.?)].setValue(component.id, false);
     }
 
     pub inline fn destroy(self: *Entity) void {
@@ -541,21 +648,24 @@ pub fn typeToId(comptime T: type) u32 {
     return  @intCast(u32, i);
 }
 
-pub inline fn componentCount() usize {
-    @setEvalBranchQuota(CHUNK_SIZE * 2);
-    var idx: u32 = 0;
-    inline for (@typeInfo(@import("root")).Struct.decls) |decl| {
-        const comp_eql = comptime std.mem.eql(u8, decl.name, COMPONENT_CONTAINER);
-        if (decl.is_pub and comptime comp_eql) {
-            inline for (@typeInfo((@field(@import("root"), decl.name))).Struct.decls) |member| {
-                if(@typeInfo(@TypeOf(member)) == .Struct) {
-                    idx += 1;
-                }
-            }
+pub fn typeToIdC(comp_type: c_type) u32 {
+    var longId = comp_type.id;
+
+    var found = false;
+    var i: usize = 0;
+    while(i < type_idx) : (i += 1) {
+        if(types[i] == longId) {
+            found = true;
+            break;
         }
     }
-
-    return idx;
+    if(!found) {
+        types[type_idx] = longId;
+        types_size[type_idx] = comp_type.size;
+        types_align[type_idx] = comp_type.alignof;
+        type_idx += 1;
+    }
+    return @intCast(u32, i);
 }
 
 pub inline fn Cast(comptime T: type, component: ?*Component) *T {
@@ -608,7 +718,7 @@ pub const SuperEntities = struct {
         world._entities[world.entities_len].sparse = try world.allocator.alloc(Entity, CHUNK_SIZE);
 
         var i: usize = 0;
-        while(i < componentCount()) : (i += 1) {
+        while(i < MAX_COMPONENTS) : (i += 1) {
             world._entities[world.entities_len].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
         }
 
@@ -686,7 +796,7 @@ const Entities = struct {
     free_idx: u32 = 0,
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     created: u32 = 0,
-    component_mask: [componentCount()]std.StaticBitSet(CHUNK_SIZE),
+    component_mask: [MAX_COMPONENTS]std.StaticBitSet(CHUNK_SIZE),
 
     pub inline fn create(ctx: *Entities) !*Entity {
         //most ECS cheat here and don't allocate memory until a component is assigned
@@ -712,12 +822,6 @@ const Entities = struct {
         entity.alive = true;
         entity.world = ctx.world;
         entity.chunk = entities_idx;
-        
-        var i: usize = 0;
-        while(i < componentCount()) : (i += 1) {
-            var queue = std.TailQueue(*Component){};
-            entity.type_components[i] = queue;
-        }
 
         ctx.alive += 1;
         ctx.free_idx += 1;

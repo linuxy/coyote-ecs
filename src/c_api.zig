@@ -213,8 +213,18 @@ export fn coyote_entities_iterator_filter_next(iterator_ptr: usize) usize {
 
 export fn coyote_component_is(component: *coyote.Component, c_type: coyote.c_type) usize {
     if(component.typeId.? == c_type.id) {
-        return 0;
-    } else {
         return 1;
+    } else {
+        return 0;
     }
+}
+
+export fn coyote_entities_count(world_ptr: usize) c_int {
+    var world = @intToPtr(*coyote.World, world_ptr);
+    return @intCast(c_int, world.entities.count());
+}
+
+export fn coyote_components_count(world_ptr: usize) c_int {
+    var world = @intToPtr(*coyote.World, world_ptr);
+    return @intCast(c_int, world.components.count());
 }

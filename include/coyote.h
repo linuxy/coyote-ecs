@@ -36,6 +36,8 @@ iterator coyote_components_entities_filter(world world, coyote_type type);
 component coyote_components_iterator_filter_next(iterator iterator);
 entity coyote_entities_iterator_filter_next(iterator iterator);
 void coyote_components_gc(world world);
+int coyote_components_count(world world);
+int coyote_entities_count(world world);
 
 #ifdef __cplusplus
 }

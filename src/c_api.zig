@@ -57,30 +57,17 @@ export fn coyote_components_gc(world_ptr: usize) void {
     world.components.gc();
 }
 
-export fn coyote_component_set(component_ptr: usize) c_int {
+export fn coyote_component_get(component_ptr: usize, c_type: coyote.c_type) ?*anyopaque {
 
     if(component_ptr == 0) {
         std.log.err("Invalid component.", .{});
-        return 1;
+        return null;
     }
 
     var component = @intToPtr(*coyote.Component, component_ptr);
-    _ = component;
+    _ = c_type;
 
-    return 0;
-}
-
-export fn coyote_component_get(component_ptr: usize) c_int {
-
-    if(component_ptr == 0) {
-        std.log.err("Invalid component.", .{});
-        return 1;
-    }
-
-    var component = @intToPtr(*coyote.Component, component_ptr);
-
-    _ = component;
-    return 0;
+    return component.data;
 }
 
 export fn coyote_entity_attach(entity_ptr: usize, component_ptr: usize, c_type: coyote.c_type) c_int {
@@ -142,6 +129,16 @@ export fn coyote_components_iterator(world_ptr: usize, out_iterator: *coyote.Sup
     return 0;
 }
 
+export fn coyote_components_iterator_next(iterator_ptr: usize) usize {
+    var iterator = @intToPtr(*coyote.SuperComponents.Iterator, iterator_ptr);
+    if(iterator.next()) |bind| {
+        return @ptrToInt(bind);
+    } else {
+        coyote.allocator.destroy(iterator);
+        return 0;
+    }
+}
+
 export fn coyote_components_iterator_filter(world_ptr: usize, c_type: coyote.c_type) usize {
     var world = @intToPtr(*coyote.World, world_ptr);
     var components = &world._components;
@@ -153,13 +150,11 @@ export fn coyote_components_iterator_filter(world_ptr: usize, c_type: coyote.c_t
     return @ptrToInt(iterator);
 }
 
-export fn coyote_components_iterator_filter_next(iterator_ptr: usize) c_int {
+export fn coyote_components_iterator_filter_next(iterator_ptr: usize) usize {
     var iterator = @intToPtr(*coyote.SuperComponents.MaskedIterator, iterator_ptr);
     if(iterator.next()) |bind| {
-        std.log.info("Next component found @ {*}", .{bind});
-        return 1;
+        return @ptrToInt(bind);
     } else {
-        std.log.info("Next component NOT found.", .{});
         coyote.allocator.destroy(iterator);
         return 0;
     }
@@ -170,6 +165,16 @@ export fn coyote_entities_iterator(world_ptr: usize, out_iterator: *coyote.Super
     var it = world.entities.iterator();
     out_iterator.* = it;
     return 0;
+}
+
+export fn coyote_entities_iterator_next(iterator_ptr: usize) usize {
+    var iterator = @intToPtr(*coyote.SuperEntities.Iterator, iterator_ptr);
+    if(iterator.next()) |bind| {
+        return @ptrToInt(bind);
+    } else {
+        coyote.allocator.destroy(iterator);
+        return 0;
+    }
 }
 
 export fn coyote_entities_iterator_filter(world_ptr: usize, c_type: coyote.c_type) usize {
@@ -183,10 +188,10 @@ export fn coyote_entities_iterator_filter(world_ptr: usize, c_type: coyote.c_typ
     return @ptrToInt(iterator);
 }
 
-export fn coyote_entities_iterator_filter_next(iterator_ptr: usize) c_int {
+export fn coyote_entities_iterator_filter_next(iterator_ptr: usize) usize {
     var iterator = @intToPtr(*coyote.SuperEntities.MaskedIterator, iterator_ptr);
-    if(iterator.next() != null) {
-        return 1;
+    if(iterator.next()) |bind| {
+        return @ptrToInt(bind);
     } else {
         coyote.allocator.destroy(iterator);
         return 0;
@@ -195,8 +200,18 @@ export fn coyote_entities_iterator_filter_next(iterator_ptr: usize) c_int {
 
 export fn coyote_component_is(component: *coyote.Component, c_type: coyote.c_type) usize {
     if(component.typeId.? == c_type.id) {
-        return 0;
-    } else {
         return 1;
+    } else {
+        return 0;
     }
+}
+
+export fn coyote_entities_count(world_ptr: usize) c_int {
+    var world = @intToPtr(*coyote.World, world_ptr);
+    return @intCast(c_int, world.entities.count());
+}
+
+export fn coyote_components_count(world_ptr: usize) c_int {
+    var world = @intToPtr(*coyote.World, world_ptr);
+    return @intCast(c_int, world.components.count());
 }

@@ -573,7 +573,7 @@ pub const Entity = struct {
             var ref = @TypeOf(comp_type){};
             ref = comp_type;
             if(!component.allocated) {
-                var data = try world.allocator.alloc(u1, comp_type.size);
+                var data = try world.allocator.create(@TypeOf(comp_type));
                 data.* = comp_type;
                 var oref = @ptrCast(?*anyopaque, data);
                 component.data = oref;
@@ -584,7 +584,7 @@ pub const Entity = struct {
                 } else {
                     if(component.allocated and component.typeId != typeToId(@TypeOf(comp_type))) {
                         opaqueDestroy(world.allocator, component.data, types_size[@intCast(usize, typeToIdC(comp_type))], types_align[@intCast(usize, typeToIdC(comp_type))]);
-                        var data = try world.allocator.alloc(u1, comp_type.size);
+                        var data = try world.allocator.create(@TypeOf(comp_type));
                         data.* = comp_type;
                         var oref = @ptrCast(?*anyopaque, data);
                         component.data = oref;

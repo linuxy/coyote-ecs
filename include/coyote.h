@@ -21,11 +21,12 @@ typedef uintptr_t world;
 typedef uintptr_t iterator;
 
 uintptr_t coyote_world_create();
-void coyote_world_destroy();
+void coyote_world_destroy(world world);
 entity coyote_entity_create(world world);
 void coyote_entity_destroy(entity entity);
 component coyote_component_create(world world, coyote_type type);
 int coyote_entity_attach(entity entity, component component, coyote_type type);
+int coyote_entity_detach(entity entity, component component);
 int coyote_entities_iterator(world world, iterator iterator);
 entity coyote_entities_iterator_next(iterator iterator);
 int coyote_components_iterator(world world, iterator iterator);
@@ -38,7 +39,7 @@ entity coyote_entities_iterator_filter_next(iterator iterator);
 void coyote_components_gc(world world);
 int coyote_components_count(world world);
 int coyote_entities_count(world world);
-void* coyote_component_get(component component, coyote_type type);
+void* coyote_component_get(component component);
 
 #ifdef __cplusplus
 }

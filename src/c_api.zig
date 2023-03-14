@@ -57,7 +57,7 @@ export fn coyote_components_gc(world_ptr: usize) void {
     world.components.gc();
 }
 
-export fn coyote_component_get(component_ptr: usize, c_type: coyote.c_type) ?*anyopaque {
+export fn coyote_component_get(component_ptr: usize) ?*anyopaque {
 
     if(component_ptr == 0) {
         std.log.err("Invalid component.", .{});
@@ -65,8 +65,6 @@ export fn coyote_component_get(component_ptr: usize, c_type: coyote.c_type) ?*an
     }
 
     var component = @intToPtr(*coyote.Component, component_ptr);
-    _ = c_type;
-
     return component.data;
 }
 
@@ -96,7 +94,7 @@ export fn coyote_entity_detach(entity_ptr: usize, component_ptr: usize) c_int {
         return 1;
     }
 
-    var component = @intToPtr(*coyote.Entity, component_ptr);
+    var component = @intToPtr(*coyote.Component, component_ptr);
 
     if(entity_ptr == 0) {
         std.log.err("Invalid entity.", .{});
@@ -104,9 +102,9 @@ export fn coyote_entity_detach(entity_ptr: usize, component_ptr: usize) c_int {
     }
 
     var entity = @intToPtr(*coyote.Entity, entity_ptr);
-    
+
     _ = entity;
-    _ = component;
+    component.detach();
     return 0;
 }
 

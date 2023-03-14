@@ -240,6 +240,7 @@ int main(void) {
     printf("Got and assigned an apple component @%d\n", a1);
 
     coyote_entity_detach(e_apple, c_apple);
+    coyote_component_destroy(c_apple);
     coyote_entity_destroy(e_apple);
     coyote_entity_destroy(e_pear);
 

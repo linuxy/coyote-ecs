@@ -245,7 +245,7 @@ int main(void) {
     coyote_entity_destroy(e_pear);
 
     printf("Number of entities: %d == 1\n", coyote_entities_count(world));
-    printf("Number of components: %d == 3\n", coyote_components_count(world));
+    printf("Number of components: %d == 2\n", coyote_components_count(world));
 
     coyote_world_destroy(world);
     printf("World destroyed.\n");

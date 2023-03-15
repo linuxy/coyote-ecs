@@ -234,11 +234,15 @@ int main(void) {
         printf("Component is NOT an orange @%d\n", c_orange);
 
     coyote_entity_attach(e_apple, c_apple, t_apple);
+    coyote_entity_attach(e_orange, c_orange, t_orange);
 
     //Assignment must happen after attach, TODO: Change?
     apple* a1 = coyote_component_get(c_apple); a1->color = 255; a1->ripe = 0; a1->harvested = 0;
+    orange* o1 = coyote_component_get(c_orange); o1->color = 125; o1->ripe = 1; o1->harvested = 0;
     printf("Got and assigned an apple component @%d\n", a1);
-
+    printf("Apple  : color %d : ripe %d : harvested %d\n", a1->color, a1->ripe, a1->harvested);
+    printf("Orange : color %d : ripe %d : harvested %d\n", o1->color, o1->ripe, o1->harvested);
+    
     coyote_entity_detach(e_apple, c_apple);
     coyote_component_destroy(c_apple);
     coyote_entity_destroy(e_apple);

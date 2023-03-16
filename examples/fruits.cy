@@ -3,7 +3,8 @@ import os 'os'
 lib = os.bindLib('../zig-out/lib/coyote.dll', [
     os.CFunc{ sym: 'coyote_world_create', args: [], ret: #usize }
     os.CFunc{ sym: 'coyote_entity_create', args: [#usize], ret: #usize }
-    os.CFunc{ sym: 'coyote_component_create', args: [#usize, #usize], ret: #usize }
+    os.CStruct{ fields: [#usize, #usize, #charPtrZ], type: t_apple }
+    os.CFunc{ sym: 'coyote_component_create', args: [#usize, t_apple], ret: #usize }
     os.CFunc{ sym: 'coyote_entity_attach', args: [#usize, #usize, #usize], ret: #int }
     os.CFunc{ sym: 'coyote_component_get', args: [#usize], ret: #voidPtr }
     os.CStruct{ fields: [#int, #int, #int], type: apple }

@@ -10,47 +10,55 @@ lib = os.bindLib('../zig-out/lib/coyote.dll', [
 ])
 
 object apple:
-    id
-    size
-    name
     color
     ripe
     harvested
+
+object t_apple:
+    id
+    size
+    name
     func type():
-        return apple{ id: 0, size: 1024, name: "apple" }
+        return t_apple{ id: 0, size: 1024, name: "apple" }
 
 object orange:
-    id
-    size
-    name
     color
     ripe
     harvested
+
+object t_orange:
+    id
+    size
+    name
     func type():
-        return orange{ id: 1, size: 1024, name: "orange" }
+        return t_orange{ id: 1, size: 1024, name: "orange" }
 
 object pear:
-    id
-    size
-    name
     color
     ripe
     harvested
+
+object t_pear:
+    id
+    size
+    name
     func type():
-        return pear{ id: 2, size: 1024, name: "pear" }
+        return t_pear{ id: 2, size: 1024, name: "pear" }
 
 world = lib.coyote_world_create()
 e_apple = lib.coyote_entity_create(world)
 e_orange = lib.coyote_entity_create(world)
 e_pear = lib.coyote_entity_create(world)
 
-c_apple = lib.coyote_component_create(world, apple.type())
-c_orange = lib.coyote_component_create(world, orange.type())
-c_pear = lib.coyote_component_create(world, pear.type())
+c_apple = lib.coyote_component_create(world, t_apple.type())
+c_orange = lib.coyote_component_create(world, t_orange.type())
+c_pear = lib.coyote_component_create(world, t_pear.type())
 
-lib.coyote_entity_attach(e_apple, c_apple, apple.type())
+lib.coyote_entity_attach(e_apple, c_apple, t_apple.type())
 
 a1obj = lib.coyote_component_get(c_apple)
-a1 = lib.ptrToapple(a1obj)
+print a1obj
 
-a1.color = 255
+a1 = lib.ptrToapple(a1obj) -- Segfault
+
+-- a1.color = 255

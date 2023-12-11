@@ -27,7 +27,6 @@ pub const Components = struct {
     };
 };
 
-
 pub fn main() !void {
     var world = try World.create();
     defer world.destroy();
@@ -47,10 +46,9 @@ pub fn main() !void {
 }
 
 pub fn tests_entity_create(world: *World) !void {
-
     var i: usize = 0;
-    while(i < NUM) : (i += 1) {
-        var anEntity = try world.entities.create();
+    while (i < NUM) : (i += 1) {
+        const anEntity = try world.entities.create();
         _ = anEntity;
     }
 }
@@ -58,7 +56,7 @@ pub fn tests_entity_create(world: *World) !void {
 pub fn tests_entity_iterate(world: *World) !void {
     var it = world.entities.iterator();
 
-    while(it.next()) |_| {
+    while (it.next()) |_| {
         //
     }
 }
@@ -66,24 +64,23 @@ pub fn tests_entity_iterate(world: *World) !void {
 pub fn tests_entity_destroy(world: *World) !void {
     var it = world.entities.iterator();
 
-    while(it.next()) |entity| {
+    while (it.next()) |entity| {
         entity.destroy();
     }
 }
 
 pub fn tests_component_create(world: *World) !void {
-
     var i: usize = 0;
-    while(i < NUM) : (i += 1) {
+    while (i < NUM) : (i += 1) {
         var anEntity = try world.entities.create();
-        _ = try anEntity.addComponent(Components.Pear{.color = 1, .ripe = false, .harvested = false});
+        _ = try anEntity.addComponent(Components.Pear{ .color = 1, .ripe = false, .harvested = false });
     }
 }
 
 pub fn tests_component_iterate(world: *World) !void {
     var it = world.components.iterator();
 
-    while(it.next()) |_| {
+    while (it.next()) |_| {
         //
     }
 }
@@ -91,14 +88,14 @@ pub fn tests_component_iterate(world: *World) !void {
 pub fn tests_component_destroy(world: *World) !void {
     var it = world.components.iterator();
 
-    while(it.next()) |component| {
+    while (it.next()) |component| {
         component.destroy();
     }
     world.components.gc();
 }
 
 pub fn elapsed(comptime f: anytype, args: anytype) !void {
-    var then = std.time.milliTimestamp();
+    const then = std.time.milliTimestamp();
     const ret = @call(.auto, f, args);
     if (@typeInfo(@TypeOf(ret)) == .ErrorUnion) try ret;
     std.debug.print("completed in {}ms.\n", .{std.time.milliTimestamp() - then});

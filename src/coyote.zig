@@ -1,14 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const rpmalloc = @import("rpmalloc");
-const Rp = @import("rpmalloc").RPMalloc(.{});
-
 pub const MAX_COMPONENTS = 12; //Maximum number of component types, 10x runs 10x slower create O(n) TODO: Fix
 pub const CHUNK_SIZE = 128; //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
-pub const allocator = if (builtin.os.tag == .windows) std.heap.c_allocator else Rp.allocator();
+pub const allocator = std.heap.c_allocator;
 
 //No chunk should know of another chunk
 //Modulo ID/CHUNK
@@ -27,7 +24,7 @@ pub const SuperComponents = struct {
     alive: usize,
 
     pub inline fn count(ctx: *SuperComponents) u32 {
-        var world = @as(*World, @ptrCast(ctx.world));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
         var i: usize = 0;
         var total: u32 = 0;
@@ -38,7 +35,7 @@ pub const SuperComponents = struct {
     }
 
     pub fn create(ctx: *SuperComponents, comptime comp_type: type) !*Component {
-        var world = @as(*World, @ptrCast(ctx.world));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
         defer ctx.alive += 1;
 
@@ -52,17 +49,17 @@ pub const SuperComponents = struct {
         }
 
         if (world._components[free].alive < CHUNK_SIZE) {
-            var component = try world._components[free].create(comp_type);
+            const component = try world._components[free].create(comp_type);
             return component;
         } else {
             try ctx.expand();
-            var component = try world._components[world.components_len - 1].create(comp_type);
+            const component = try world._components[world.components_len - 1].create(comp_type);
             return component;
         }
     }
 
     pub fn create_c(ctx: *SuperComponents, comp_type: c_type) !*Component {
-        var world = @as(*World, @ptrCast(ctx.world));
+        var world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
         defer ctx.alive += 1;
 
@@ -76,19 +73,19 @@ pub const SuperComponents = struct {
         }
 
         if (world._components[free].alive < CHUNK_SIZE) {
-            var component = try world._components[free].create_c(comp_type);
+            const component = try world._components[free].create_c(comp_type);
             return component;
         } else {
             try ctx.expand();
-            var component = try world._components[world.components_len - 1].create_c(comp_type);
+            const component = try world._components[world.components_len - 1].create_c(comp_type);
             return component;
         }
     }
 
     pub fn expand(ctx: *SuperComponents) !void {
-        var world = @as(*World, @ptrCast(ctx.world));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
-        var temp = try world.allocator.realloc(world._components, world.components_len + 1);
+        const temp = try world.allocator.realloc(world._components, world.components_len + 1);
         world._components = temp;
         world._components[world.components_len].world = world;
         world._components[world.components_len].len = 0;
@@ -110,7 +107,7 @@ pub const SuperComponents = struct {
     }
 
     pub fn gc(ctx: *SuperComponents) void {
-        var world = @as(*World, @ptrCast(ctx.world));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         var i: usize = 0;
         var j: usize = 0;
         while (i < world.components_len) : (i += 1) {
@@ -131,10 +128,10 @@ pub const SuperComponents = struct {
 
         pub inline fn next(it: *Iterator) ?*Component {
             while (it.index < it.alive) : (it.index += 1) {
-                var mod = it.index / CHUNK_SIZE;
-                var rem = @rem(it.index, CHUNK_SIZE);
+                const mod = it.index / CHUNK_SIZE;
+                const rem = @rem(it.index, CHUNK_SIZE);
                 if (it.ctx.*[mod].sparse[rem].alive) {
-                    var sparse_index = rem;
+                    const sparse_index = rem;
                     it.index += 1;
                     return &it.ctx.*[mod].sparse[sparse_index];
                 }
@@ -155,10 +152,10 @@ pub const SuperComponents = struct {
             //TODO: Count unique types
 
             while (it.index < it.alive) : (it.index += 1) {
-                var mod = it.index / CHUNK_SIZE;
-                var rem = @rem(it.index, CHUNK_SIZE);
+                const mod = it.index / CHUNK_SIZE;
+                const rem = @rem(it.index, CHUNK_SIZE);
                 if (it.world._components[mod].sparse[rem].typeId == it.filter_type) {
-                    var sparse_index = rem;
+                    const sparse_index = rem;
                     it.index += 1;
                     return &it.ctx.*[mod].sparse[sparse_index];
                 }
@@ -183,13 +180,13 @@ pub const SuperComponents = struct {
 
             //Scan all components in every chunk, find the first matching component type owned by the entity
             while (it.outer_index < it.components_alive) : (it.outer_index += 1) {
-                var mod = it.outer_index / CHUNK_SIZE;
-                var rem = @rem(it.outer_index, CHUNK_SIZE);
+                const mod = it.outer_index / CHUNK_SIZE;
+                const rem = @rem(it.outer_index, CHUNK_SIZE);
                 if (it.world._components[mod].sparse[rem].owners.isSet(it.entity.id)) { //Found a component matching type, check all chunks for entities
                     var inner: usize = 0;
                     while (inner < it.world.entities_len) : (inner += 1) {
                         if (it.world._entities[inner].component_mask[it.filter_type].isSet(it.world._components[mod].sparse[rem].id)) {
-                            var sparse_index = rem;
+                            const sparse_index = rem;
                             it.outer_index += 1;
                             return &it.ctx.*[mod].sparse[sparse_index];
                         }
@@ -202,22 +199,22 @@ pub const SuperComponents = struct {
 
     //TODO: By attached vs unattached
     pub inline fn iterator(ctx: *SuperComponents) SuperComponents.Iterator {
-        var world = @as(*World, @ptrCast(ctx.world));
-        var components = &world._components;
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const components = &world._components;
         return .{ .ctx = components, .index = 0, .alive = CHUNK_SIZE * world.components_len, .world = world };
     }
 
     pub fn iteratorFilter(ctx: *SuperComponents, comptime comp_type: type) SuperComponents.MaskedIterator {
         //get an iterator for components attached to this entity
-        var world = @as(*World, @ptrCast(ctx.world));
-        var components = &world._components;
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const components = &world._components;
         return .{ .ctx = components, .filter_type = typeToId(comp_type), .alive = CHUNK_SIZE * world.components_len, .world = world };
     }
 
     pub fn iteratorFilterByEntity(ctx: *SuperComponents, entity: *Entity, comptime comp_type: type) SuperComponents.MaskedEntityIterator {
         //get an iterator for components attached to this entity
-        var world = @as(*World, @ptrCast(ctx.world));
-        var components = &world._components;
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const components = &world._components;
         return .{ .ctx = components, .filter_type = typeToId(comp_type), .components_alive = ctx.alive, .entities_alive = world.entities.alive, .world = world, .entity = entity };
     }
 };
@@ -239,7 +236,7 @@ pub const _Components = struct {
     }
 
     pub fn create(ctx: *_Components, comptime comp_type: type) !*Component {
-        var world = @as(*World, @ptrCast(ctx.world));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
         if (ctx.alive > CHUNK_SIZE)
             return error.NoFreeComponentSlots;
@@ -293,7 +290,7 @@ pub const _Components = struct {
     }
 
     pub fn create_c(ctx: *_Components, comp_type: c_type) !*Component {
-        var world = @as(*World, @ptrCast(ctx.world));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
         if (ctx.alive > CHUNK_SIZE)
             return error.NoFreeComponentSlots;
@@ -372,9 +369,6 @@ pub const World = struct {
     allocator: std.mem.Allocator,
 
     pub fn create() !*World {
-        if (builtin.os.tag != .windows)
-            try Rp.init(null, .{});
-
         var world = allocator.create(World) catch unreachable;
 
         world.allocator = allocator;
@@ -458,7 +452,7 @@ pub const Component = struct {
     }
 
     pub inline fn set(component: *Component, comptime comp_type: type, members: anytype) !void {
-        var field_ptr = @as(*comp_type, @ptrCast(component.data));
+        const field_ptr = @as(*comp_type, @ptrCast(@alignCast(component.data)));
         inline for (std.meta.fields(@TypeOf(members))) |sets| {
             @field(field_ptr, sets.name) = @field(members, sets.name);
         }
@@ -473,7 +467,7 @@ pub const Component = struct {
     }
 
     pub inline fn dealloc(self: *Component) void {
-        var world = @as(*World, @ptrCast(self.world));
+        const world = @as(*World, @ptrCast(@alignCast(self.world)));
 
         if (!self.alive and self.magic == MAGIC and self.allocated) {
             opaqueDestroy(world.allocator, self.data.?, types_size[@as(usize, @intCast(self.typeId.?))], types_align[@as(usize, @intCast(self.typeId.?))]);
@@ -482,7 +476,7 @@ pub const Component = struct {
     }
 
     pub inline fn destroy(self: *Component) void {
-        var world = @as(*World, @ptrCast(self.world));
+        const world = @as(*World, @ptrCast(@alignCast(self.world)));
 
         //TODO: Destroy data? If allocated just hold to reuse.
         if (self.alive and self.magic == MAGIC) {
@@ -510,40 +504,40 @@ pub const Entity = struct {
     allocated: bool = false,
 
     pub inline fn addComponent(ctx: *Entity, comp_val: anytype) !*Component {
-        var world = @as(*World, @ptrCast(ctx.world));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const component = try world.components.create(@TypeOf(comp_val));
         try ctx.attach(component, comp_val);
         return component;
     }
 
-    pub inline fn getOneComponent(ctx: *Entity, comptime comp_type: type) ?*Component {
-        var world = @as(*World, @ptrCast(ctx.world));
+    pub inline fn getOneComponent(ctx: *Entity, comptime comp_type: type) ?*const Component {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         var it = world.components.iteratorFilterByEntity(ctx, comp_type);
-        var next = it.next();
+        const next = it.next();
         return next;
     }
 
     pub fn attach(self: *Entity, component: *Component, comp_type: anytype) !void {
-        var world = @as(*World, @ptrCast(component.world));
+        const world = @as(*World, @ptrCast(@alignCast(component.world)));
 
         if (@sizeOf(@TypeOf(comp_type)) > 0) {
             var ref = @TypeOf(comp_type){};
             ref = comp_type;
             if (!component.allocated) {
-                var data = try world.allocator.create(@TypeOf(comp_type));
+                const data = try world.allocator.create(@TypeOf(comp_type));
                 data.* = comp_type;
-                var oref = @as(?*anyopaque, @ptrCast(data));
+                const oref = @as(?*anyopaque, @ptrCast(data));
                 component.data = oref;
             } else {
                 if (component.allocated and component.typeId == typeToId(@TypeOf(comp_type))) {
-                    var data = CastData(@TypeOf(comp_type), component.data);
+                    const data = CastData(@TypeOf(comp_type), component.data);
                     data.* = comp_type;
                 } else {
                     if (component.allocated and component.typeId != typeToId(@TypeOf(comp_type))) {
                         opaqueDestroy(world.allocator, component.data, types_size[@as(usize, @intCast(typeToId(@TypeOf(comp_type))))], types_align[@as(usize, @intCast(typeToId(@TypeOf(comp_type))))]);
-                        var data = try world.allocator.create(@TypeOf(comp_type));
+                        const data = try world.allocator.create(@TypeOf(comp_type));
                         data.* = comp_type;
-                        var oref = @as(?*anyopaque, @ptrCast(data));
+                        const oref = @as(?*anyopaque, @ptrCast(data));
                         component.data = oref;
                     }
                 }
@@ -558,26 +552,26 @@ pub const Entity = struct {
     }
 
     pub fn attach_c(self: *Entity, component: *Component, comp_type: *c_type) !void {
-        var world = @as(*World, @ptrCast(component.world));
+        const world = @as(*World, @ptrCast(@alignCast(component.world)));
 
         if (@sizeOf(@TypeOf(comp_type)) > 0) {
             var ref = @TypeOf(comp_type){};
             ref = comp_type;
             if (!component.allocated) {
-                var data = try world.allocator.create(@TypeOf(comp_type));
+                const data = try world.allocator.create(@TypeOf(comp_type));
                 data.* = comp_type;
-                var oref = @as(?*anyopaque, @ptrCast(data));
+                const oref = @as(?*anyopaque, @ptrCast(data));
                 component.data = oref;
             } else {
                 if (component.allocated and component.typeId == typeToId(@TypeOf(comp_type))) {
-                    var data = CastData(@TypeOf(comp_type), component.data);
+                    const data = CastData(@TypeOf(comp_type), component.data);
                     data.* = comp_type;
                 } else {
                     if (component.allocated and component.typeId != typeToId(@TypeOf(comp_type))) {
                         opaqueDestroy(world.allocator, component.data, types_size[@as(usize, @intCast(typeToIdC(comp_type)))], types_align[@as(usize, @intCast(typeToIdC(comp_type)))]);
-                        var data = try world.allocator.create(@TypeOf(comp_type));
+                        const data = try world.allocator.create(@TypeOf(comp_type));
                         data.* = comp_type;
-                        var oref = @as(?*anyopaque, @ptrCast(data));
+                        const oref = @as(?*anyopaque, @ptrCast(data));
                         component.data = oref;
                     }
                 }
@@ -592,7 +586,7 @@ pub const Entity = struct {
     }
 
     pub inline fn detach(self: *Entity, component: *Component) !void {
-        var world = @as(*World, @ptrCast(self.world));
+        var world = @as(*World, @ptrCast(@alignCast(self.world)));
 
         component.attached = false;
         component.owners.setValue(self.id, false);
@@ -600,7 +594,7 @@ pub const Entity = struct {
     }
 
     pub inline fn destroy(self: *Entity) void {
-        var world = @as(*World, @ptrCast(self.world));
+        var world = @as(*World, @ptrCast(@alignCast(self.world)));
 
         self.alive = false;
         world._entities[self.chunk].alive -= 1;
@@ -662,12 +656,12 @@ pub fn typeToIdC(comp_type: c_type) u32 {
 }
 
 pub inline fn Cast(comptime T: type, component: ?*Component) *T {
-    var field_ptr = @as(*T, @ptrCast(T, component.?.data));
+    const field_ptr = @as(*T, @ptrCast(@alignCast(component.?.data)));
     return field_ptr;
 }
 
 pub inline fn CastData(comptime T: type, component: ?*anyopaque) *T {
-    var field_ptr = @as(*T, @ptrCast(component));
+    const field_ptr = @as(*T, @ptrCast(@alignCast(component)));
     return field_ptr;
 }
 
@@ -676,7 +670,7 @@ pub const SuperEntities = struct {
     alive: usize,
 
     pub inline fn count(ctx: *SuperEntities) u32 {
-        const world = @as(*World, @ptrCast(ctx.world));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
         var i: usize = 0;
         var total: u32 = 0;
@@ -687,7 +681,7 @@ pub const SuperEntities = struct {
     }
 
     pub fn create(ctx: *SuperEntities) !*Entity {
-        var world = @as(*World, @ptrCast(ctx.world));
+        var world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
         defer ctx.alive += 1;
 
@@ -700,7 +694,7 @@ pub const SuperEntities = struct {
     }
 
     pub fn expand(ctx: *SuperEntities) !void {
-        var world = @as(*World, @ptrCast(ctx.world));
+        var world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
         world._entities = try world.allocator.realloc(world._entities, world.entities_len + 1);
         world._entities[world.entities_len].world = world;
@@ -764,13 +758,13 @@ pub const SuperEntities = struct {
     };
 
     pub inline fn iterator(ctx: *SuperEntities) SuperEntities.Iterator {
-        const world = @as(*World, @ptrCast(ctx.world));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const entities = &world._entities;
         return .{ .ctx = entities, .alive = ctx.alive };
     }
 
     pub fn iteratorFilter(ctx: *SuperEntities, comptime comp_type: type) SuperEntities.MaskedIterator {
-        const world = @as(*World, @ptrCast(ctx.world));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const entities = &world._entities;
 
         //TODO: Go through each chunk

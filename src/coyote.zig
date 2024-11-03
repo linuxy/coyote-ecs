@@ -440,7 +440,7 @@ pub const Component = struct {
     typeId: ?u32 = undefined,
     allocated: bool = false,
     alive: bool = false,
-    type_node: std.TailQueue(*Component).Node,
+    type_node: std.DoublyLinkedList(*Component).Node,
     magic: usize = MAGIC,
 
     pub inline fn is(self: *const Component, comp_type: anytype) bool {
@@ -822,7 +822,7 @@ const Entities = struct {
 pub const Systems = struct {
     pub fn run(comptime f: anytype, args: anytype) !void {
         const ret = @call(.auto, f, args);
-        if (@typeInfo(@TypeOf(ret)) == .ErrorUnion) try ret;
+        if (@typeInfo(@TypeOf(ret)) == .error_union) try ret;
     }
 };
 

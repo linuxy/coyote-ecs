@@ -1,22 +1,18 @@
 const std = @import("std");
 
-pub fn build(b: *std.build.Builder) void {
+pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
     const exe = b.addExecutable(.{
-        .root_source_file = .{ .path = "examples/fruits.zig" },
+        .root_source_file = b.path("examples/fruits.zig"),
         .optimize = optimize,
         .target = target,
         .name = "ecs",
     });
 
-    exe.addAnonymousModule("rpmalloc", .{
-        .source_file = .{ .path = "vendor/rpmalloc-zig-port/src/rpmalloc.zig" },
-    });
-
-    exe.addAnonymousModule("coyote-ecs", .{
-        .source_file = .{ .path = "src/coyote.zig" },
+    exe.root_module.addAnonymousImport("coyote-ecs", .{
+        .root_source_file = b.path("src/coyote.zig"),
     });
 
     exe.linkLibC();
@@ -29,18 +25,15 @@ pub fn build(b: *std.build.Builder) void {
     run_step.dependOn(&run_cmd.step);
 
     const main_tests = b.addExecutable(.{
-        .root_source_file = .{ .path = "examples/tests.zig" },
+        .root_source_file = b.path("examples/tests.zig"),
         .optimize = optimize,
         .target = target,
         .name = "tests",
     });
     main_tests.linkLibC();
-    main_tests.addAnonymousModule("rpmalloc", .{
-        .source_file = .{ .path = "vendor/rpmalloc-zig-port/src/rpmalloc.zig" },
-    });
 
-    main_tests.addAnonymousModule("coyote-ecs", .{
-        .source_file = .{ .path = "src/coyote.zig" },
+    main_tests.root_module.addAnonymousImport("coyote-ecs", .{
+        .root_source_file = b.path("src/coyote.zig"),
     });
     b.installArtifact(main_tests);
 
@@ -54,10 +47,10 @@ pub fn build(b: *std.build.Builder) void {
     ) orelse false;
 
     // Static C lib
-    const static_c_lib: ?*std.build.LibExeObjStep = if (target.getOsTag() != .wasi) lib: {
+    const static_c_lib: ?*std.Build.Step.Compile = if (target.result.os.tag != .wasi) lib: {
         const static_lib = b.addStaticLibrary(.{
             .name = "coyote",
-            .root_source_file = .{ .path = "src/c_api.zig" },
+            .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -71,8 +64,8 @@ pub fn build(b: *std.build.Builder) void {
             .optimize = optimize,
         });
         static_binding_test.linkLibC();
-        static_binding_test.addIncludePath(.{ .path = "include" });
-        static_binding_test.addCSourceFile(.{ .file = .{ .path = "examples/fruits.c" }, .flags = &[_][]const u8{ "-Wall", "-Wextra", "-pedantic", "-std=c99", "-D_POSIX_C_SOURCE=199309L" } });
+        static_binding_test.addIncludePath(b.path("include"));
+        static_binding_test.addCSourceFile(.{ .file = b.path("examples/fruits.c"), .flags = &[_][]const u8{ "-Wall", "-Wextra", "-pedantic", "-std=c99", "-D_POSIX_C_SOURCE=199309L" } });
         static_binding_test.linkLibrary(static_lib);
         if (test_install) b.installArtifact(static_binding_test);
 
@@ -85,12 +78,12 @@ pub fn build(b: *std.build.Builder) void {
     _ = static_c_lib;
 
     // Dynamic C lib
-    if (target.isNative()) {
+    if (target.query.isNative()) {
         const dynamic_lib_name = "coyote";
 
         const dynamic_lib = b.addSharedLibrary(.{
             .name = dynamic_lib_name,
-            .root_source_file = .{ .path = "src/c_api.zig" },
+            .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = optimize,
         });
@@ -104,8 +97,8 @@ pub fn build(b: *std.build.Builder) void {
             .optimize = optimize,
         });
         dynamic_binding_test.linkLibC();
-        dynamic_binding_test.addIncludePath(.{ .path = "include" });
-        dynamic_binding_test.addCSourceFile(.{ .file = .{ .path = "examples/fruits.c" }, .flags = &[_][]const u8{ "-Wall", "-Wextra", "-pedantic", "-std=c99", "-D_POSIX_C_SOURCE=199309L" } });
+        dynamic_binding_test.addIncludePath(b.path("include"));
+        dynamic_binding_test.addCSourceFile(.{ .file = b.path("examples/fruits.c"), .flags = &[_][]const u8{ "-Wall", "-Wextra", "-pedantic", "-std=c99", "-D_POSIX_C_SOURCE=199309L" } });
         dynamic_binding_test.linkLibrary(dynamic_lib);
         if (test_install) b.installArtifact(dynamic_binding_test);
 

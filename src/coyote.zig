@@ -257,6 +257,69 @@ pub const SuperComponents = struct {
         }
     };
 
+    pub const BatchIterator = struct {
+        ctx: *[]_Components,
+        index: usize = 0,
+        batch_size: usize,
+        alive: usize = 0,
+        world: *World,
+        current_batch: []Component = &[_]Component{},
+
+        pub fn init(ctx: *[]_Components, world: *World, batch_size: usize) BatchIterator {
+            return .{
+                .ctx = ctx,
+                .batch_size = batch_size,
+                .alive = CHUNK_SIZE * world.components_len,
+                .world = world,
+            };
+        }
+
+        pub fn nextBatch(it: *BatchIterator) ?[]Component {
+            if (it.index >= it.alive) return null;
+
+            const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
+            var batch = std.ArrayList(Component).init(it.world.allocator);
+            defer batch.deinit();
+
+            var processed: usize = 0;
+            while (processed < it.batch_size and it.index < it.alive) {
+                const remaining = @min(vector_width, it.batch_size - processed);
+                const mod = it.index / CHUNK_SIZE;
+
+                var alive_mask: @Vector(vector_width, bool) = undefined;
+                inline for (0..remaining) |i| {
+                    const idx = it.index + i;
+                    const rem = @rem(idx, CHUNK_SIZE);
+                    alive_mask[i] = it.ctx.*[mod].sparse[rem].alive;
+                }
+
+                inline for (0..remaining) |i| {
+                    if (alive_mask[i]) {
+                        const rem = @rem(it.index + i, CHUNK_SIZE);
+                        try batch.append(it.ctx.*[mod].sparse[rem]);
+                        processed += 1;
+                    }
+                }
+
+                it.index += remaining;
+            }
+
+            if (batch.items.len > 0) {
+                it.current_batch = try it.world.allocator.dupe(Component, batch.items);
+                return it.current_batch;
+            }
+
+            return null;
+        }
+
+        pub fn freeBatch(it: *BatchIterator) void {
+            if (it.current_batch.len > 0) {
+                it.world.allocator.free(it.current_batch);
+                it.current_batch = &[_]Component{};
+            }
+        }
+    };
+
     //TODO: By attached vs unattached
     pub inline fn iterator(ctx: *SuperComponents) SuperComponents.Iterator {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
@@ -276,6 +339,13 @@ pub const SuperComponents = struct {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const components = &world._components;
         return .{ .ctx = components, .filter_type = typeToId(comp_type), .components_alive = ctx.alive, .entities_alive = world.entities.alive, .world = world, .entity = entity };
+    }
+
+    // Add batch iterator creation method
+    pub fn batchIterator(ctx: *SuperComponents, batch_size: usize) BatchIterator {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const components = &world._components;
+        return BatchIterator.init(components, world, batch_size);
     }
 };
 

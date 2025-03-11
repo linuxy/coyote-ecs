@@ -149,14 +149,31 @@ pub const SuperComponents = struct {
         world: *World,
 
         pub fn next(it: *MaskedIterator) ?*Component {
-            //TODO: Count unique types
+            const vector_width = std.simd.suggestVectorLength(u32) orelse 4; // Or appropriate size
+            var i: usize = it.index;
+            while (i + vector_width <= it.alive) : (i += vector_width) {
+                const mod = i / CHUNK_SIZE;
+                const rems = @Vector(vector_width, u32){ @intCast(@rem(i, CHUNK_SIZE)), @intCast(@rem(i + 1, CHUNK_SIZE)), @intCast(@rem(i + 2, CHUNK_SIZE)), @intCast(@rem(i + 3, CHUNK_SIZE)) };
 
-            while (it.index < it.alive) : (it.index += 1) {
-                const mod = it.index / CHUNK_SIZE;
-                const rem = @rem(it.index, CHUNK_SIZE);
-                if (it.world._components[mod].sparse[rem].typeId == it.filter_type) {
+                // Process multiple mask checks in parallel
+                const masks = @Vector(vector_width, bool){ it.world._components[mod].entity_mask[it.filter_type].isSet(rems[0]), it.world._components[mod].entity_mask[it.filter_type].isSet(rems[1]), it.world._components[mod].entity_mask[it.filter_type].isSet(rems[2]), it.world._components[mod].entity_mask[it.filter_type].isSet(rems[3]) };
+
+                // Find first match
+                inline for (0..vector_width) |j| {
+                    if (masks[j]) {
+                        it.index = i + j + 1;
+                        return &it.ctx.*[mod].sparse[@intCast(rems[j])];
+                    }
+                }
+            }
+
+            // Handle remaining elements
+            while (i < it.alive) : (i += 1) {
+                const mod = i / CHUNK_SIZE;
+                const rem = @rem(i, CHUNK_SIZE);
+                if (it.world._components[mod].entity_mask[it.filter_type].isSet(rem)) {
                     const sparse_index = rem;
-                    it.index += 1;
+                    it.index = i + 1;
                     return &it.ctx.*[mod].sparse[sparse_index];
                 }
             }
@@ -176,23 +193,66 @@ pub const SuperComponents = struct {
         entity: *Entity,
 
         pub inline fn next(it: *MaskedEntityIterator) ?*Component {
-            //TODO: Count unique types
+            const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
 
-            //Scan all components in every chunk, find the first matching component type owned by the entity
-            while (it.outer_index < it.components_alive) : (it.outer_index += 1) {
-                const mod = it.outer_index / CHUNK_SIZE;
-                const rem = @rem(it.outer_index, CHUNK_SIZE);
-                if (it.world._components[mod].sparse[rem].owners.isSet(it.entity.id)) { //Found a component matching type, check all chunks for entities
-                    var inner: usize = 0;
-                    while (inner < it.world.entities_len) : (inner += 1) {
-                        if (it.world._entities[inner].component_mask[it.filter_type].isSet(it.world._components[mod].sparse[rem].id)) {
-                            const sparse_index = rem;
-                            it.outer_index += 1;
-                            return &it.ctx.*[mod].sparse[sparse_index];
+            while (it.outer_index < it.components_alive) {
+                // Process vector_width components at a time
+                const remaining = it.components_alive - it.outer_index;
+                const batch_size = @min(vector_width, remaining);
+
+                // Prepare vectors for parallel processing
+                var owner_checks: @Vector(vector_width, bool) = @splat(false);
+                var component_indices: @Vector(vector_width, u32) = undefined;
+
+                // Fill vectors with component data
+                for (0..batch_size) |i| {
+                    const idx = it.outer_index + i;
+                    const mod = idx / CHUNK_SIZE;
+                    const rem = @rem(idx, CHUNK_SIZE);
+                    component_indices[i] = @intCast(rem);
+                    owner_checks[i] = it.world._components[mod].sparse[rem].owners.isSet(it.entity.id);
+                }
+
+                // Process components that are owned by the entity
+                for (0..batch_size) |i| {
+                    if (owner_checks[i]) {
+                        const mod = (it.outer_index + i) / CHUNK_SIZE;
+                        const rem = component_indices[i];
+
+                        // Use SIMD for entity chunk processing
+                        const entities_per_vector = std.simd.suggestVectorLength(u32) orelse 4;
+                        var entity_idx: usize = 0;
+
+                        while (entity_idx + entities_per_vector <= it.world.entities_len) : (entity_idx += entities_per_vector) {
+                            var entity_checks: @Vector(entities_per_vector, bool) = undefined;
+
+                            // Check multiple entities in parallel
+                            inline for (0..entities_per_vector) |j| {
+                                entity_checks[j] = it.world._entities[entity_idx + j].component_mask[it.filter_type].isSet(it.world._components[mod].sparse[@intCast(rem)].id);
+                            }
+
+                            // If any entity has this component
+                            inline for (0..entities_per_vector) |j| {
+                                if (entity_checks[j]) {
+                                    it.outer_index += i + 1;
+                                    return &it.ctx.*[mod].sparse[@intCast(rem)];
+                                }
+                            }
+                        }
+
+                        // Handle remaining entities
+                        while (entity_idx < it.world.entities_len) : (entity_idx += 1) {
+                            if (it.world._entities[entity_idx].component_mask[it.filter_type].isSet(it.world._components[mod].sparse[@intCast(rem)].id)) {
+                                it.outer_index += i + 1;
+                                return &it.ctx.*[mod].sparse[@intCast(rem)];
+                            }
                         }
                     }
                 }
+
+                it.outer_index += batch_size;
             }
+
             return null;
         }
     };
@@ -828,5 +888,5 @@ pub const Systems = struct {
 
 pub fn opaqueDestroy(self: std.mem.Allocator, ptr: anytype, sz: usize, alignment: u8) void {
     const non_const_ptr = @as([*]u8, @ptrFromInt(@intFromPtr(ptr)));
-    self.rawFree(non_const_ptr[0..sz], std.math.log2(alignment), @returnAddress());
+    self.rawFree(non_const_ptr[0..sz], .fromByteUnits((alignment)), @returnAddress());
 }

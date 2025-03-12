@@ -153,10 +153,24 @@ pub const SuperComponents = struct {
             var i: usize = it.index;
             while (i + vector_width <= it.alive) : (i += vector_width) {
                 const mod = i / CHUNK_SIZE;
-                const rems = @Vector(vector_width, u32){ @intCast(@rem(i, CHUNK_SIZE)), @intCast(@rem(i + 1, CHUNK_SIZE)), @intCast(@rem(i + 2, CHUNK_SIZE)), @intCast(@rem(i + 3, CHUNK_SIZE)) };
+                const rems = blk: {
+                    var result: @Vector(vector_width, u32) = undefined;
+                    var j: u32 = 0;
+                    while (j < vector_width) : (j += 1) {
+                        result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
+                    }
+                    break :blk result;
+                };
 
                 // Process multiple mask checks in parallel
-                const masks = @Vector(vector_width, bool){ it.world._components[mod].entity_mask[it.filter_type].isSet(rems[0]), it.world._components[mod].entity_mask[it.filter_type].isSet(rems[1]), it.world._components[mod].entity_mask[it.filter_type].isSet(rems[2]), it.world._components[mod].entity_mask[it.filter_type].isSet(rems[3]) };
+                const masks = blk: {
+                    var result: @Vector(vector_width, bool) = undefined;
+                    var j: u32 = 0;
+                    while (j < vector_width) : (j += 1) {
+                        result[j] = it.world._components[mod].entity_mask[it.filter_type].isSet(rems[j]);
+                    }
+                    break :blk result;
+                };
 
                 // Find first match
                 inline for (0..vector_width) |j| {
@@ -207,9 +221,10 @@ pub const SuperComponents = struct {
                 // Fill vectors with component data
                 for (0..batch_size) |i| {
                     const idx = it.outer_index + i;
-                    const mod = idx / CHUNK_SIZE;
                     const rem = @rem(idx, CHUNK_SIZE);
+                    const mod = idx / CHUNK_SIZE;
                     component_indices[i] = @intCast(rem);
+                    //owner_checks[i] = it.world._entities[idx].component_mask[it.filter_type].isSet(it.entity.id);
                     owner_checks[i] = it.world._components[mod].sparse[rem].owners.isSet(it.entity.id);
                 }
 
@@ -888,5 +903,5 @@ pub const Systems = struct {
 
 pub fn opaqueDestroy(self: std.mem.Allocator, ptr: anytype, sz: usize, alignment: u8) void {
     const non_const_ptr = @as([*]u8, @ptrFromInt(@intFromPtr(ptr)));
-    self.rawFree(non_const_ptr[0..sz], .fromByteUnits((alignment)), @returnAddress());
+    self.rawFree(non_const_ptr[0..sz], std.math.log2(alignment), @returnAddress());
 }

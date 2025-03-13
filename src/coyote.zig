@@ -108,15 +108,38 @@ pub const SuperComponents = struct {
 
     pub fn gc(ctx: *SuperComponents) void {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
+
         var i: usize = 0;
-        var j: usize = 0;
         while (i < world.components_len) : (i += 1) {
+            var j: usize = 0;
+            while (j + vector_width <= CHUNK_SIZE) : (j += vector_width) {
+                // Create vectors for parallel checking
+                var allocated_vec: @Vector(vector_width, bool) = undefined;
+                var alive_vec: @Vector(vector_width, bool) = undefined;
+
+                // Fill vectors with component states
+                var k: u32 = 0;
+                while (k < vector_width) : (k += 1) {
+                    allocated_vec[k] = world._components[i].sparse[j + k].allocated;
+                    alive_vec[k] = world._components[i].sparse[j + k].alive;
+                }
+
+                // Process components in parallel
+                k = 0;
+                while (k < vector_width) : (k += 1) {
+                    if (allocated_vec[k] and !alive_vec[k]) {
+                        world._components[i].sparse[j + k].dealloc();
+                    }
+                }
+            }
+
+            // Handle remaining elements
             while (j < CHUNK_SIZE) : (j += 1) {
                 if (world._components[i].sparse[j].allocated and !world._components[i].sparse[j].alive) {
                     world._components[i].sparse[j].dealloc();
                 }
             }
-            j = 0;
         }
     }
 
@@ -127,13 +150,46 @@ pub const SuperComponents = struct {
         world: *World,
 
         pub inline fn next(it: *Iterator) ?*Component {
-            while (it.index < it.alive) : (it.index += 1) {
-                const mod = it.index / CHUNK_SIZE;
-                const rem = @rem(it.index, CHUNK_SIZE);
+            const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
+            var i: usize = it.index;
+
+            while (i + vector_width <= it.alive) : (i += vector_width) {
+                const mod = i / CHUNK_SIZE;
+                const rems = blk: {
+                    var result: @Vector(vector_width, u32) = undefined;
+                    var j: u32 = 0;
+                    while (j < vector_width) : (j += 1) {
+                        result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
+                    }
+                    break :blk result;
+                };
+
+                // Check multiple components in parallel
+                const alive_vec = blk: {
+                    var result: @Vector(vector_width, bool) = undefined;
+                    var j: u32 = 0;
+                    while (j < vector_width) : (j += 1) {
+                        result[j] = it.ctx.*[mod].sparse[@intCast(rems[j])].alive;
+                    }
+                    break :blk result;
+                };
+
+                // Find first alive component
+                inline for (0..vector_width) |j| {
+                    if (alive_vec[j]) {
+                        it.index = i + j + 1;
+                        return &it.ctx.*[mod].sparse[@intCast(rems[j])];
+                    }
+                }
+            }
+
+            // Handle remaining elements
+            while (i < it.alive) : (i += 1) {
+                const mod = i / CHUNK_SIZE;
+                const rem = @rem(i, CHUNK_SIZE);
                 if (it.ctx.*[mod].sparse[rem].alive) {
-                    const sparse_index = rem;
-                    it.index += 1;
-                    return &it.ctx.*[mod].sparse[sparse_index];
+                    it.index = i + 1;
+                    return &it.ctx.*[mod].sparse[rem];
                 }
             }
 
@@ -210,29 +266,36 @@ pub const SuperComponents = struct {
             const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
 
             while (it.outer_index < it.components_alive) {
-                // Process vector_width components at a time
                 const remaining = it.components_alive - it.outer_index;
                 const batch_size = @min(vector_width, remaining);
 
-                // Prepare vectors for parallel processing
+                // Create vectors for parallel processing
+                var indices: @Vector(vector_width, u32) = undefined;
+                var mods: @Vector(vector_width, u32) = undefined;
+                var rems: @Vector(vector_width, u32) = undefined;
                 var owner_checks: @Vector(vector_width, bool) = @splat(false);
-                var component_indices: @Vector(vector_width, u32) = undefined;
 
                 // Fill vectors with component data
-                for (0..batch_size) |i| {
-                    const idx = it.outer_index + i;
-                    const rem = @rem(idx, CHUNK_SIZE);
-                    const mod = idx / CHUNK_SIZE;
-                    component_indices[i] = @intCast(rem);
-                    //owner_checks[i] = it.world._entities[idx].component_mask[it.filter_type].isSet(it.entity.id);
-                    owner_checks[i] = it.world._components[mod].sparse[rem].owners.isSet(it.entity.id);
+                var i: u32 = 0;
+                while (i < batch_size) : (i += 1) {
+                    const idx: u32 = @intCast(it.outer_index + i);
+                    indices[i] = idx;
+                    mods[i] = @intCast(idx / CHUNK_SIZE);
+                    rems[i] = @intCast(@rem(idx, CHUNK_SIZE));
+                }
+
+                // Process ownership checks in parallel
+                i = 0;
+                while (i < batch_size) : (i += 1) {
+                    owner_checks[i] = it.world._components[@intCast(mods[i])].sparse[@intCast(rems[i])].owners.isSet(it.entity.id);
                 }
 
                 // Process components that are owned by the entity
-                for (0..batch_size) |i| {
+                i = 0;
+                while (i < batch_size) : (i += 1) {
                     if (owner_checks[i]) {
-                        const mod = (it.outer_index + i) / CHUNK_SIZE;
-                        const rem = component_indices[i];
+                        const mod: usize = @intCast(mods[i]);
+                        const rem: usize = @intCast(rems[i]);
 
                         // Use SIMD for entity chunk processing
                         const entities_per_vector = std.simd.suggestVectorLength(u32) orelse 4;
@@ -242,24 +305,26 @@ pub const SuperComponents = struct {
                             var entity_checks: @Vector(entities_per_vector, bool) = undefined;
 
                             // Check multiple entities in parallel
-                            inline for (0..entities_per_vector) |j| {
-                                entity_checks[j] = it.world._entities[entity_idx + j].component_mask[it.filter_type].isSet(it.world._components[mod].sparse[@intCast(rem)].id);
+                            var j: u32 = 0;
+                            while (j < entities_per_vector) : (j += 1) {
+                                entity_checks[j] = it.world._entities[entity_idx + j].component_mask[it.filter_type].isSet(it.world._components[mod].sparse[rem].id);
                             }
 
                             // If any entity has this component
-                            inline for (0..entities_per_vector) |j| {
+                            j = 0;
+                            while (j < entities_per_vector) : (j += 1) {
                                 if (entity_checks[j]) {
                                     it.outer_index += i + 1;
-                                    return &it.ctx.*[mod].sparse[@intCast(rem)];
+                                    return &it.ctx.*[mod].sparse[rem];
                                 }
                             }
                         }
 
                         // Handle remaining entities
                         while (entity_idx < it.world.entities_len) : (entity_idx += 1) {
-                            if (it.world._entities[entity_idx].component_mask[it.filter_type].isSet(it.world._components[mod].sparse[@intCast(rem)].id)) {
+                            if (it.world._entities[entity_idx].component_mask[it.filter_type].isSet(it.world._components[mod].sparse[rem].id)) {
                                 it.outer_index += i + 1;
-                                return &it.ctx.*[mod].sparse[@intCast(rem)];
+                                return &it.ctx.*[mod].sparse[rem];
                             }
                         }
                     }

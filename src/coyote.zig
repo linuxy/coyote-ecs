@@ -903,5 +903,5 @@ pub const Systems = struct {
 
 pub fn opaqueDestroy(self: std.mem.Allocator, ptr: anytype, sz: usize, alignment: u8) void {
     const non_const_ptr = @as([*]u8, @ptrFromInt(@intFromPtr(ptr)));
-    self.rawFree(non_const_ptr[0..sz], std.math.log2(alignment), @returnAddress());
+    self.rawFree(non_const_ptr[0..sz], .fromByteUnits(alignment), @returnAddress());
 }

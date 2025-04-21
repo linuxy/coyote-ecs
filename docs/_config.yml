@@ -1,0 +1,9 @@
+title: Coyote ECS Documentation
+description: Documentation for the Coyote ECS library
+theme: jekyll-theme-minimal
+baseurl: "/coyote-ecs"
+url: "https://linuxy.github.io"
+
+# Build settings
+markdown: kramdown
+permalink: pretty 

@@ -204,3 +204,21 @@ export fn coyote_components_count(world_ptr: usize) c_int {
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
     return @as(c_int, @intCast(world.components.count()));
 }
+
+export fn coyote_components_iterator_filter_range(world_ptr: usize, c_type: coyote.c_type, start_idx: usize, end_idx: usize) usize {
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    const components = &world._components;
+    const iterator = coyote.allocator.create(coyote.SuperComponents.MaskedRangeIterator) catch unreachable;
+    iterator.* = coyote.SuperComponents.MaskedRangeIterator{ .ctx = components, .filter_type = coyote.typeToIdC(c_type), .index = start_idx, .start_index = start_idx, .end_index = end_idx, .world = world };
+    return @intFromPtr(iterator);
+}
+
+export fn coyote_components_iterator_filter_range_next(iterator_ptr: usize) usize {
+    const iterator = @as(*coyote.SuperComponents.MaskedRangeIterator, @ptrFromInt(iterator_ptr));
+    if (iterator.next()) |bind| {
+        return @intFromPtr(bind);
+    } else {
+        coyote.allocator.destroy(iterator);
+        return 0;
+    }
+}

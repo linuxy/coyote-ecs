@@ -65,6 +65,98 @@ pub fn UpdateVelocities(world: *World, gravity: f32) void {
 }
 ```
 
+## Parallel Processing with Chunked Iteration
+
+Coyote ECS provides a `iteratorFilterRange` function that allows you to process components in chunks, which is perfect for parallel processing:
+
+### Using iteratorFilterRange
+
+The `iteratorFilterRange` function allows you to specify a range of components to iterate over:
+
+```zig
+pub fn UpdatePositionsParallel(world: *World, delta_time: f32) void {
+    const thread_count = std.Thread.getCpuCount();
+    const component_count = world.components.count(Components.Position);
+    const chunk_size = (component_count + thread_count - 1) / thread_count;
+    
+    var threads: []std.Thread = undefined;
+    threads = std.heap.page_allocator.alloc(std.Thread, thread_count) catch return;
+    defer std.heap.page_allocator.free(threads);
+    
+    var i: usize = 0;
+    while (i < thread_count) : (i += 1) {
+        const start = i * chunk_size;
+        const end = @min(start + chunk_size, component_count);
+        
+        threads[i] = std.Thread.spawn(.{}, struct {
+            fn updateChunk(w: *World, start_idx: usize, end_idx: usize, dt: f32) void {
+                var it = w.components.iteratorFilterRange(Components.Position, start_idx, end_idx);
+                const dt_vec = @splat(2, dt);
+                
+                while (it.next()) |component| {
+                    var pos = component.get(Components.Position);
+                    pos.data += dt_vec;
+                }
+            }
+        }.updateChunk, .{ world, start, end, delta_time }) catch continue;
+    }
+    
+    // Wait for all threads to complete
+    for (threads) |thread| {
+        thread.join();
+    }
+}
+```
+
+### Combining SIMD with Parallel Processing
+
+For maximum performance, you can combine SIMD operations with parallel processing:
+
+```zig
+pub fn UpdatePhysicsParallel(world: *World, delta_time: f32) void {
+    const thread_count = std.Thread.getCpuCount();
+    const component_count = world.components.count(Components.Position);
+    const chunk_size = (component_count + thread_count - 1) / thread_count;
+    
+    var threads: []std.Thread = undefined;
+    threads = std.heap.page_allocator.alloc(std.Thread, thread_count) catch return;
+    defer std.heap.page_allocator.free(threads);
+    
+    var i: usize = 0;
+    while (i < thread_count) : (i += 1) {
+        const start = i * chunk_size;
+        const end = @min(start + chunk_size, component_count);
+        
+        threads[i] = std.Thread.spawn(.{}, struct {
+            fn updatePhysicsChunk(w: *World, start_idx: usize, end_idx: usize, dt: f32) void {
+                // Process positions with SIMD
+                var pos_it = w.components.iteratorFilterRange(Components.Position, start_idx, end_idx);
+                const dt_vec = @splat(2, dt);
+                
+                while (pos_it.next()) |component| {
+                    var pos = component.get(Components.Position);
+                    pos.data += dt_vec;
+                }
+                
+                // Process velocities with SIMD
+                var vel_it = w.components.iteratorFilterRange(Components.Velocity, start_idx, end_idx);
+                const gravity_vec = Vec2{ 0, 9.8 * dt };
+                
+                while (vel_it.next()) |component| {
+                    var vel = component.get(Components.Velocity);
+                    vel.data += gravity_vec;
+                }
+            }
+        }.updatePhysicsChunk, .{ world, start, end, delta_time }) catch continue;
+    }
+    
+    // Wait for all threads to complete
+    for (threads) |thread| {
+        thread.join();
+    }
+}
+```
+
 ## Vectorized Entity and Component Storage
 
 ### SoA (Structure of Arrays) vs AoS (Array of Structures)
@@ -163,45 +255,6 @@ For optimal SIMD performance, ensure your component data is properly aligned:
 pub const AlignedPosition = struct {
     data: Vec2 align(16) = Vec2{ 0, 0 },
 };
-```
-
-## Parallel Processing
-
-Combine SIMD with parallel processing for even greater performance:
-
-```zig
-pub fn UpdatePositionsParallel(world: *World, delta_time: f32) void {
-    const thread_count = std.Thread.getCpuCount();
-    const component_count = world.components.count(Components.Position);
-    const chunk_size = (component_count + thread_count - 1) / thread_count;
-    
-    var threads: []std.Thread = undefined;
-    threads = std.heap.page_allocator.alloc(std.Thread, thread_count) catch return;
-    defer std.heap.page_allocator.free(threads);
-    
-    var i: usize = 0;
-    while (i < thread_count) : (i += 1) {
-        const start = i * chunk_size;
-        const end = @min(start + chunk_size, component_count);
-        
-        threads[i] = std.Thread.spawn(.{}, struct {
-            fn updateChunk(w: *World, start_idx: usize, end_idx: usize, dt: f32) void {
-                var it = w.components.iteratorFilterRange(Components.Position, start_idx, end_idx);
-                const dt_vec = @splat(2, dt);
-                
-                while (it.next()) |component| {
-                    var pos = component.get(Components.Position);
-                    pos.data += dt_vec;
-                }
-            }
-        }.updateChunk, .{ world, start, end, delta_time }) catch continue;
-    }
-    
-    // Wait for all threads to complete
-    for (threads) |thread| {
-        thread.join();
-    }
-}
 ```
 
 ## Benchmarking SIMD vs Non-SIMD

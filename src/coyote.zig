@@ -35,26 +35,15 @@ pub const SuperComponents = struct {
     }
 
     pub fn create(ctx: *SuperComponents, comptime comp_type: type) !*Component {
-        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        var world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
         defer ctx.alive += 1;
 
-        var i: usize = 0;
-        var free: usize = 0;
-        while (i < world.components_len) : (i += 1) {
-            if (world._components[i].alive < CHUNK_SIZE) {
-                free = i;
-                break;
-            }
-        }
-
-        if (world._components[free].alive < CHUNK_SIZE) {
-            const component = try world._components[free].create(comp_type);
-            return component;
-        } else {
+        if (world._components[world.components_free_idx].len < CHUNK_SIZE) {
+            return try world._components[world.components_free_idx].create(comp_type);
+        } else { //Create new chunk
             try ctx.expand();
-            const component = try world._components[world.components_len - 1].create(comp_type);
-            return component;
+            return try world._components[world.components_free_idx].create(comp_type);
         }
     }
 
@@ -83,15 +72,14 @@ pub const SuperComponents = struct {
     }
 
     pub fn expand(ctx: *SuperComponents) !void {
-        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        var world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
-        const temp = try world.allocator.realloc(world._components, world.components_len + 1);
-        world._components = temp;
+        world._components = try world.allocator.realloc(world._components, world.components_len + 1);
         world._components[world.components_len].world = world;
         world._components[world.components_len].len = 0;
         world._components[world.components_len].alive = 0;
-        world._components[world.components_len].free_idx = 0;
         world._components[world.components_len].created = 0;
+        world._components[world.components_len].free_idx = 0;
         world._components[world.components_len].chunk = world.components_len;
         world._components[world.components_len].sparse = try world.allocator.alloc(Component, CHUNK_SIZE);
 
@@ -102,7 +90,6 @@ pub const SuperComponents = struct {
 
         world.components_len += 1;
         world.components_free_idx = world.components_len - 1;
-
         components_idx = world.components_free_idx;
     }
 
@@ -183,6 +170,66 @@ pub const SuperComponents = struct {
 
             // Handle remaining elements
             while (i < it.alive) : (i += 1) {
+                const mod = i / CHUNK_SIZE;
+                const rem = @rem(i, CHUNK_SIZE);
+                if (it.world._components[mod].entity_mask[it.filter_type].isSet(rem)) {
+                    const sparse_index = rem;
+                    it.index = i + 1;
+                    return &it.ctx.*[mod].sparse[sparse_index];
+                }
+            }
+
+            return null;
+        }
+    };
+
+    pub const MaskedRangeIterator = struct {
+        ctx: *[]_Components,
+        index: usize = 0,
+        filter_type: u32,
+        start_index: usize = 0,
+        end_index: usize = 0,
+        world: *World,
+
+        pub fn next(it: *MaskedRangeIterator) ?*Component {
+            const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
+            var i: usize = it.index;
+
+            // Ensure we don't go beyond the end_index
+            const effective_end = @min(it.end_index, it.index + vector_width);
+
+            if (i < effective_end) {
+                const mod = i / CHUNK_SIZE;
+                const rems = blk: {
+                    var result: @Vector(vector_width, u32) = undefined;
+                    var j: u32 = 0;
+                    while (j < vector_width) : (j += 1) {
+                        result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
+                    }
+                    break :blk result;
+                };
+
+                // Process multiple mask checks in parallel
+                const masks = blk: {
+                    var result: @Vector(vector_width, bool) = undefined;
+                    var j: u32 = 0;
+                    while (j < vector_width) : (j += 1) {
+                        result[j] = it.world._components[mod].entity_mask[it.filter_type].isSet(rems[j]);
+                    }
+                    break :blk result;
+                };
+
+                // Find first match
+                inline for (0..vector_width) |j| {
+                    if (masks[j]) {
+                        it.index = i + j + 1;
+                        return &it.ctx.*[mod].sparse[@intCast(rems[j])];
+                    }
+                }
+            }
+
+            // Handle remaining elements
+            while (i < it.end_index) : (i += 1) {
                 const mod = i / CHUNK_SIZE;
                 const rem = @rem(i, CHUNK_SIZE);
                 if (it.world._components[mod].entity_mask[it.filter_type].isSet(rem)) {
@@ -284,6 +331,13 @@ pub const SuperComponents = struct {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const components = &world._components;
         return .{ .ctx = components, .filter_type = typeToId(comp_type), .alive = CHUNK_SIZE * world.components_len, .world = world };
+    }
+
+    pub fn iteratorFilterRange(ctx: *SuperComponents, comptime comp_type: type, start_idx: usize, end_idx: usize) SuperComponents.MaskedRangeIterator {
+        //get an iterator for components attached to this entity within a specific range
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const components = &world._components;
+        return .{ .ctx = components, .filter_type = typeToId(comp_type), .index = start_idx, .start_index = start_idx, .end_index = end_idx, .world = world };
     }
 
     pub fn iteratorFilterByEntity(ctx: *SuperComponents, entity: *Entity, comptime comp_type: type) SuperComponents.MaskedEntityIterator {

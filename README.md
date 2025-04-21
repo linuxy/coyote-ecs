@@ -3,6 +3,8 @@ A fast and simple zig native ECS.
 
 Builds against zig 0.14.0
 
+📚 [Documentation](https://linuxy.github.io/coyote-ecs/docs/)
+
 ```git clone --recursive https://github.com/linuxy/coyote-ecs.git```
 
 To build:

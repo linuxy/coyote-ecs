@@ -17,7 +17,7 @@ Benchmark:
 [coyote-bunnies](https://github.com/linuxy/coyote-bunnies)
 
 Define your components in a container
-```Zig
+```zig
 const std = @import("std");
 const ecs = @import("coyote-ecs");
 
@@ -48,7 +48,7 @@ pub const Components = struct {
 ```
 
 Create some entities and components in a world
-```Zig
+```zig
 pub fn main() !void {
     //Create a world
     var world = try World.create();
@@ -111,7 +111,7 @@ pub fn main() !void {
 ```
 
 Create some systems
-```Zig
+```zig
 pub fn Grow(world: *World) void {
     var it = world.components.iterator();
     var i: u32 = 0;
@@ -176,7 +176,7 @@ pub fn Raze(world: *World) void {
 ```
 
 With C bindings
-```C
+```c
 #include <stddef.h>
 #include <stdio.h>
 #include "../include/coyote.h"

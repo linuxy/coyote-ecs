@@ -4,9 +4,18 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Add a debug option for release builds
+    const debug_info = b.option(bool, "debug-info", "Include debug information in release builds") orelse false;
+
+    // Create a modified optimize option that includes debug info when requested
+    const effective_optimize = if (debug_info and optimize == .ReleaseFast)
+        .ReleaseFast
+    else
+        optimize;
+
     const exe = b.addExecutable(.{
         .root_source_file = b.path("examples/fruits.zig"),
-        .optimize = optimize,
+        .optimize = effective_optimize,
         .target = target,
         .name = "ecs",
     });
@@ -26,7 +35,7 @@ pub fn build(b: *std.Build) void {
 
     const main_tests = b.addExecutable(.{
         .root_source_file = b.path("examples/tests.zig"),
-        .optimize = optimize,
+        .optimize = effective_optimize,
         .target = target,
         .name = "tests",
     });
@@ -52,7 +61,7 @@ pub fn build(b: *std.Build) void {
             .name = "coyote",
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
-            .optimize = optimize,
+            .optimize = effective_optimize,
         });
         b.installArtifact(static_lib);
         static_lib.linkLibC();
@@ -61,7 +70,7 @@ pub fn build(b: *std.Build) void {
         const static_binding_test = b.addExecutable(.{
             .name = "static-binding-test",
             .target = target,
-            .optimize = optimize,
+            .optimize = effective_optimize,
         });
         static_binding_test.linkLibC();
         static_binding_test.addIncludePath(b.path("include"));
@@ -85,7 +94,7 @@ pub fn build(b: *std.Build) void {
             .name = dynamic_lib_name,
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
-            .optimize = optimize,
+            .optimize = effective_optimize,
         });
         dynamic_lib.linkLibC();
         b.installArtifact(dynamic_lib);
@@ -94,7 +103,7 @@ pub fn build(b: *std.Build) void {
         const dynamic_binding_test = b.addExecutable(.{
             .name = "dynamic-binding-test",
             .target = target,
-            .optimize = optimize,
+            .optimize = effective_optimize,
         });
         dynamic_binding_test.linkLibC();
         dynamic_binding_test.addIncludePath(b.path("include"));

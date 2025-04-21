@@ -37,38 +37,57 @@ pub const SuperComponents = struct {
     pub fn create(ctx: *SuperComponents, comptime comp_type: type) !*Component {
         var world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
-        defer ctx.alive += 1;
-
-        if (world._components[world.components_free_idx].len < CHUNK_SIZE) {
-            return try world._components[world.components_free_idx].create(comp_type);
-        } else { //Create new chunk
-            try ctx.expand();
-            return try world._components[world.components_free_idx].create(comp_type);
+        // Find a chunk with available space
+        var i: usize = 0;
+        var found_chunk = false;
+        while (i < world.components_len) : (i += 1) {
+            if (world._components[i].alive < CHUNK_SIZE) {
+                world.components_free_idx = i;
+                found_chunk = true;
+                break;
+            }
         }
+
+        // If no chunk has space, create a new one
+        if (!found_chunk) {
+            try ctx.expand();
+        }
+
+        // Create the component in the selected chunk
+        const component = try world._components[world.components_free_idx].create(comp_type);
+
+        // Only increment the alive count after successful creation
+        ctx.alive += 1;
+
+        return component;
     }
 
     pub fn create_c(ctx: *SuperComponents, comp_type: c_type) !*Component {
         var world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
-        defer ctx.alive += 1;
-
+        // Find a chunk with available space
         var i: usize = 0;
-        var free: usize = 0;
+        var found_chunk = false;
         while (i < world.components_len) : (i += 1) {
             if (world._components[i].alive < CHUNK_SIZE) {
-                free = i;
+                world.components_free_idx = i;
+                found_chunk = true;
                 break;
             }
         }
 
-        if (world._components[free].alive < CHUNK_SIZE) {
-            const component = try world._components[free].create_c(comp_type);
-            return component;
-        } else {
+        // If no chunk has space, create a new one
+        if (!found_chunk) {
             try ctx.expand();
-            const component = try world._components[world.components_len - 1].create_c(comp_type);
-            return component;
         }
+
+        // Create the component in the selected chunk
+        const component = try world._components[world.components_free_idx].create_c(comp_type);
+
+        // Only increment the alive count after successful creation
+        ctx.alive += 1;
+
+        return component;
     }
 
     pub fn expand(ctx: *SuperComponents) !void {
@@ -359,60 +378,139 @@ pub const _Components = struct {
     chunk: usize,
 
     pub inline fn count(ctx: *_Components) u32 {
-        //count of all living components
-
         return ctx.alive;
+    }
+
+    pub fn processComponentsSimd(ctx: *_Components, comptime comp_type: type, processor: fn (*comp_type) void) void {
+        const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
+        var i: usize = 0;
+
+        // Process components in SIMD batches
+        while (i + vector_width <= ctx.alive) : (i += vector_width) {
+            const rems = blk: {
+                var result: @Vector(vector_width, u32) = undefined;
+                var j: u32 = 0;
+                while (j < vector_width) : (j += 1) {
+                    result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
+                }
+                break :blk result;
+            };
+
+            // Process multiple components in parallel
+            inline for (0..vector_width) |j| {
+                const component = &ctx.sparse[@intCast(rems[j])];
+                if (component.alive and component.typeId == typeToId(comp_type)) {
+                    if (component.data) |data| {
+                        const typed_data = CastData(comp_type, data);
+                        processor(typed_data);
+                    }
+                }
+            }
+        }
+
+        // Handle remaining components
+        while (i < ctx.alive) : (i += 1) {
+            const rem = @rem(i, CHUNK_SIZE);
+            const component = &ctx.sparse[rem];
+            if (component.alive and component.typeId == typeToId(comp_type)) {
+                if (component.data) |data| {
+                    const typed_data = CastData(comp_type, data);
+                    processor(typed_data);
+                }
+            }
+        }
+    }
+
+    pub fn processComponentsRangeSimd(ctx: *_Components, comptime comp_type: type, start_idx: usize, end_idx: usize, processor: fn (*comp_type) void) void {
+        const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
+        var i: usize = start_idx;
+
+        // Process components in SIMD batches within the range
+        while (i + vector_width <= end_idx) : (i += vector_width) {
+            const rems = blk: {
+                var result: @Vector(vector_width, u32) = undefined;
+                var j: u32 = 0;
+                while (j < vector_width) : (j += 1) {
+                    result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
+                }
+                break :blk result;
+            };
+
+            // Process multiple components in parallel
+            inline for (0..vector_width) |j| {
+                const component = &ctx.sparse[@intCast(rems[j])];
+                if (component.alive and component.typeId == typeToId(comp_type)) {
+                    if (component.data) |data| {
+                        const typed_data = CastData(comp_type, data);
+                        processor(typed_data);
+                    }
+                }
+            }
+        }
+
+        // Handle remaining components
+        while (i < end_idx) : (i += 1) {
+            const rem = @rem(i, CHUNK_SIZE);
+            const component = &ctx.sparse[rem];
+            if (component.alive and component.typeId == typeToId(comp_type)) {
+                if (component.data) |data| {
+                    const typed_data = CastData(comp_type, data);
+                    processor(typed_data);
+                }
+            }
+        }
     }
 
     pub fn create(ctx: *_Components, comptime comp_type: type) !*Component {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
-        if (ctx.alive > CHUNK_SIZE)
+        if (ctx.alive >= CHUNK_SIZE)
             return error.NoFreeComponentSlots;
 
+        // Reset free_idx if it's out of bounds
         if (ctx.free_idx >= CHUNK_SIZE)
             ctx.free_idx = 0;
 
-        //find end of sparse array
+        // Find a free slot
+        const start_idx = ctx.free_idx;
         var wrapped = false;
-        while (ctx.sparse[ctx.free_idx].alive == true) {
-            if (wrapped and ctx.free_idx > CHUNK_SIZE)
-                return error.NoFreeComponentSlots;
-
+        while (ctx.sparse[ctx.free_idx].alive) {
             ctx.free_idx += 1;
             if (ctx.free_idx >= CHUNK_SIZE) {
+                if (wrapped) {
+                    return error.NoFreeComponentSlots;
+                }
                 ctx.free_idx = 0;
                 wrapped = true;
             }
+            if (ctx.free_idx == start_idx) {
+                return error.NoFreeComponentSlots;
+            }
         }
-        if (!wrapped)
-            ctx.len += 1;
 
+        // Initialize the component
         var component = &ctx.sparse[ctx.free_idx];
-
         component.world = world;
         component.attached = false;
         component.magic = MAGIC;
-
-        //Optimize: Match free indexes to like components
-        if (component.allocated and component.typeId != null and component.typeId != typeToId(comp_type))
-            opaqueDestroy(world.allocator, component.data.?, types_size[typeToId(comp_type)], types_align[typeToId(comp_type)]);
-
-        if (component.typeId != typeToId(comp_type))
-            component.allocated = false;
-
         component.typeId = typeToId(comp_type);
         component.id = ctx.free_idx;
         component.alive = true;
         component.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
         component.type_node = .{ .data = component };
         component.chunk = ctx.chunk;
+        component.data = null;
+        component.allocated = false;
 
+        // Update chunk state
         ctx.free_idx += 1;
         ctx.created += 1;
         ctx.alive += 1;
+        if (!wrapped) {
+            ctx.len += 1;
+        }
 
-        if (typeToId(comp_type) > MAX_COMPONENTS - 1)
+        if (typeToId(comp_type) >= MAX_COMPONENTS)
             return error.ComponentNotInContainer;
 
         return component;
@@ -421,52 +519,53 @@ pub const _Components = struct {
     pub fn create_c(ctx: *_Components, comp_type: c_type) !*Component {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
 
-        if (ctx.alive > CHUNK_SIZE)
+        if (ctx.alive >= CHUNK_SIZE)
             return error.NoFreeComponentSlots;
 
+        // Reset free_idx if it's out of bounds
         if (ctx.free_idx >= CHUNK_SIZE)
             ctx.free_idx = 0;
 
-        //find end of sparse array
+        // Find a free slot
+        const start_idx = ctx.free_idx;
         var wrapped = false;
-        while (ctx.sparse[ctx.free_idx].alive == true) {
-            if (wrapped and ctx.free_idx > CHUNK_SIZE)
-                return error.NoFreeComponentSlots;
-
+        while (ctx.sparse[ctx.free_idx].alive) {
             ctx.free_idx += 1;
             if (ctx.free_idx >= CHUNK_SIZE) {
+                if (wrapped) {
+                    return error.NoFreeComponentSlots;
+                }
                 ctx.free_idx = 0;
                 wrapped = true;
             }
+            if (ctx.free_idx == start_idx) {
+                return error.NoFreeComponentSlots;
+            }
         }
-        if (!wrapped)
-            ctx.len += 1;
 
+        // Initialize the component
         var component = &ctx.sparse[ctx.free_idx];
-
         component.world = world;
         component.attached = false;
         component.magic = MAGIC;
-
-        //Optimize: Match free indexes to like components
-        if (component.allocated and component.typeId != null and component.typeId != typeToIdC(comp_type))
-            opaqueDestroy(world.allocator, component.data.?, types_size[typeToIdC(comp_type)], types_align[typeToIdC(comp_type)]);
-
-        if (component.typeId != typeToIdC(comp_type))
-            component.allocated = false;
-
         component.typeId = typeToIdC(comp_type);
         component.id = ctx.free_idx;
         component.alive = true;
         component.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
         component.type_node = .{ .data = component };
         component.chunk = ctx.chunk;
+        component.data = null;
+        component.allocated = false;
 
+        // Update chunk state
         ctx.free_idx += 1;
         ctx.created += 1;
         ctx.alive += 1;
+        if (!wrapped) {
+            ctx.len += 1;
+        }
 
-        if (typeToIdC(comp_type) > MAX_COMPONENTS - 1)
+        if (typeToIdC(comp_type) >= MAX_COMPONENTS)
             return error.ComponentNotInContainer;
 
         return component;

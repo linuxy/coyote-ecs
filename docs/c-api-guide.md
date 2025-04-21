@@ -92,6 +92,36 @@ while ((next = coyote_components_iterator_filter_next(it)) != 0) {
 }
 ```
 
+## Iterating Over Components in Chunks
+
+For parallel processing, you can iterate over components in chunks:
+
+```c
+// Get the total number of components
+int total_components = coyote_components_count(world);
+int thread_count = 4; // Or use a thread pool
+int chunk_size = (total_components + thread_count - 1) / thread_count;
+
+// Process components in parallel
+for (int i = 0; i < thread_count; i++) {
+    size_t start_idx = i * chunk_size;
+    size_t end_idx = (i + 1) * chunk_size;
+    if (end_idx > total_components) {
+        end_idx = total_components;
+    }
+    
+    // Create an iterator for this chunk
+    iterator chunk_it = coyote_components_iterator_filter_range(world, t_position, start_idx, end_idx);
+    
+    // Process the chunk
+    component next;
+    while ((next = coyote_components_iterator_filter_range_next(chunk_it)) != 0) {
+        position* pos = coyote_component_get(next);
+        // Work with the position component in this chunk
+    }
+}
+```
+
 ## Iterating Over Entities
 
 ```c
@@ -99,11 +129,7 @@ while ((next = coyote_components_iterator_filter_next(it)) != 0) {
 iterator it = coyote_entities_iterator_filter(world, t_position);
 entity next;
 while ((next = coyote_entities_iterator_filter_next(it)) != 0) {
-    component c = coyote_entity_get_component(next, t_velocity);
-    if (c != 0) {
-        velocity* vel = coyote_component_get(c);
-        // Entity has both position and velocity
-    }
+    // Work with the entity
 }
 ```
 
@@ -113,14 +139,8 @@ while ((next = coyote_entities_iterator_filter_next(it)) != 0) {
 
 ```c
 if (coyote_component_is(component, t_position)) {
-    // Component is a position
+    // This is a position component
 }
-```
-
-### Detaching Components
-
-```c
-coyote_entity_detach(entity, component);
 ```
 
 ### Destroying Components
@@ -129,99 +149,91 @@ coyote_entity_detach(entity, component);
 coyote_component_destroy(component);
 ```
 
-## Entity Management
+## Memory Management
 
-### Destroying Entities
+### Garbage Collection
+
+Call the garbage collector when appropriate:
 
 ```c
-coyote_entity_destroy(entity);
+coyote_components_gc(world);
 ```
 
-### Getting Entity Count
+### Counting Entities and Components
 
 ```c
-size_t count = coyote_entities_count(world);
+int entity_count = coyote_entities_count(world);
+int component_count = coyote_components_count(world);
 ```
 
-## Complete Example
+## Advanced Usage
 
-Here's a complete example showing how to use the C API:
+### Parallel Processing
+
+For high-performance applications, you can use the chunked iterator to process components in parallel:
 
 ```c
-#include <stdio.h>
-#include <coyote.h>
+#include <pthread.h>
 
-typedef struct position {
-    float x;
-    float y;
-} position;
+#define NUM_THREADS 4
 
-typedef struct velocity {
-    float x;
-    float y;
-} velocity;
+typedef struct {
+    world world;
+    coyote_type component_type;
+    size_t start_idx;
+    size_t end_idx;
+} thread_data;
 
-static const coyote_type t_position = COYOTE_MAKE_TYPE(0, position);
-static const coyote_type t_velocity = COYOTE_MAKE_TYPE(1, velocity);
-
-int main(void) {
-    // Create world
-    world world = coyote_world_create();
-    if (world == 0) {
-        printf("Failed to create world\n");
-        return 1;
-    }
-
-    // Create entity
-    entity e = coyote_entity_create(world);
+void* process_chunk(void* arg) {
+    thread_data* data = (thread_data*)arg;
     
-    // Create and attach components
-    component c_pos = coyote_component_create(world, t_position);
-    component c_vel = coyote_component_create(world, t_velocity);
+    iterator it = coyote_components_iterator_filter_range(
+        data->world, 
+        data->component_type, 
+        data->start_idx, 
+        data->end_idx
+    );
     
-    coyote_entity_attach(e, c_pos, t_position);
-    coyote_entity_attach(e, c_vel, t_velocity);
-
-    // Set component data
-    position* pos = coyote_component_get(c_pos);
-    pos->x = 0.0f;
-    pos->y = 0.0f;
-
-    velocity* vel = coyote_component_get(c_vel);
-    vel->x = 1.0f;
-    vel->y = 1.0f;
-
-    // Iterate over components
-    iterator it = coyote_components_iterator_filter(world, t_position);
     component next;
-    while ((next = coyote_components_iterator_filter_next(it)) != 0) {
-        position* p = coyote_component_get(next);
-        printf("Position: (%f, %f)\n", p->x, p->y);
+    while ((next = coyote_components_iterator_filter_range_next(it)) != 0) {
+        // Process the component
     }
+    
+    return NULL;
+}
 
-    // Cleanup
-    coyote_entity_detach(e, c_pos);
-    coyote_entity_detach(e, c_vel);
-    coyote_component_destroy(c_pos);
-    coyote_component_destroy(c_vel);
-    coyote_entity_destroy(e);
-    coyote_world_destroy(world);
-
-    return 0;
+void process_components_parallel(world world, coyote_type component_type) {
+    int total_components = coyote_components_count(world);
+    int chunk_size = (total_components + NUM_THREADS - 1) / NUM_THREADS;
+    
+    pthread_t threads[NUM_THREADS];
+    thread_data thread_args[NUM_THREADS];
+    
+    // Create threads
+    for (int i = 0; i < NUM_THREADS; i++) {
+        size_t start_idx = i * chunk_size;
+        size_t end_idx = (i + 1) * chunk_size;
+        if (end_idx > total_components) {
+            end_idx = total_components;
+        }
+        
+        thread_args[i].world = world;
+        thread_args[i].component_type = component_type;
+        thread_args[i].start_idx = start_idx;
+        thread_args[i].end_idx = end_idx;
+        
+        pthread_create(&threads[i], NULL, process_chunk, &thread_args[i]);
+    }
+    
+    // Wait for all threads to complete
+    for (int i = 0; i < NUM_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+    }
 }
 ```
 
-## Best Practices
-
-1. Always check return values from API functions
-2. Clean up resources properly (destroy components and entities)
-3. Use appropriate error handling
-4. Keep component structs simple and focused
-5. Use meaningful type IDs when creating component types
-6. Consider using enums for component type IDs
-
 ## Next Steps
 
-- Check out the [Examples](examples.md) for more usage patterns
-- Learn about [Performance Optimization](performance-guide.md) for C code
+- Check out the [Performance Guide](performance-guide.md) for optimization tips
+- Explore the [Advanced Optimizations Guide](advanced-optimizations.md) for SIMD and parallel processing
 - Read the [Core Concepts](core-concepts.md) for a deeper understanding of ECS 

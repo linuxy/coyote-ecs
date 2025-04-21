@@ -291,8 +291,13 @@ zig build -Doptimize=ReleaseFast
 ./zig-out/bin/benchmark
 ```
 
+## Advanced Optimizations
+
+For more advanced optimization techniques, including SIMD operations, vectorization, and parallel processing, check out the [Advanced Optimizations Guide](advanced-optimizations.md).
+
 ## Next Steps
 
 - Check out the [Examples](examples.md) for performance-oriented examples
 - Read the [Core Concepts](core-concepts.md) for a deeper understanding of ECS
-- Explore the [C API Guide](c-api-guide.md) for C-specific optimizations 
+- Explore the [C API Guide](c-api-guide.md) for C-specific optimizations
+- Learn about [Advanced Optimizations](advanced-optimizations.md) including SIMD and vectorization 

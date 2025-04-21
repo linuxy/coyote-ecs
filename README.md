@@ -16,7 +16,7 @@ A more complete example:
 Benchmark:
 [coyote-bunnies](https://github.com/linuxy/coyote-bunnies)
 
-Define your components in a container
+Define your components
 ```zig
 const std = @import("std");
 const ecs = @import("coyote-ecs");
@@ -25,25 +25,22 @@ const World = ecs.World;
 const Cast = ecs.Cast;
 const Systems = ecs.Systems;
 
-//Container name is configured in ECS constants
-pub const Components = struct {
-    pub const Apple = struct {
-        color: u32 = 0,
-        ripe: bool = false,
-        harvested: bool = false,
-    };
+pub const Apple = struct {
+    color: u32 = 0,
+    ripe: bool = false,
+    harvested: bool = false,
+};
 
-    pub const Orange = struct {
-        color: u32 = 0,
-        ripe: bool = false,
-        harvested: bool = false,
-    };
+pub const Orange = struct {
+    color: u32 = 0,
+    ripe: bool = false,
+    harvested: bool = false,
+};
 
-    pub const Pear = struct {
-        color: u32 = 0,
-        ripe: bool = false,
-        harvested: bool = false,
-    };
+pub const Pear = struct {
+    color: u32 = 0,
+    ripe: bool = false,
+    harvested: bool = false,
 };
 ```
 

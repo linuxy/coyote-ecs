@@ -13,11 +13,15 @@ pub fn build(b: *std.Build) void {
     else
         optimize;
 
-    const exe = b.addExecutable(.{
+    const fruits_module = b.createModule(.{
         .root_source_file = b.path("examples/fruits.zig"),
         .optimize = effective_optimize,
         .target = target,
+    });
+
+    const exe = b.addExecutable(.{
         .name = "ecs",
+        .root_module = fruits_module,
     });
 
     exe.root_module.addAnonymousImport("coyote-ecs", .{
@@ -33,11 +37,15 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const main_tests = b.addExecutable(.{
+    const main_test_module = b.createModule(.{
         .root_source_file = b.path("examples/tests.zig"),
         .optimize = effective_optimize,
         .target = target,
+    });
+
+    const main_tests = b.addExecutable(.{
         .name = "tests",
+        .root_module = main_test_module,
     });
     main_tests.linkLibC();
 
@@ -57,11 +65,16 @@ pub fn build(b: *std.Build) void {
 
     // Static C lib
     const static_c_lib: ?*std.Build.Step.Compile = if (target.result.os.tag != .wasi) lib: {
-        const static_lib = b.addStaticLibrary(.{
-            .name = "coyote",
+        const c_lib_module = b.createModule(.{
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = effective_optimize,
+        });
+
+        const static_lib = b.addLibrary(.{
+            .name = "coyote",
+            .root_module = c_lib_module,
+            .linkage = .static,
         });
         b.installArtifact(static_lib);
         static_lib.linkLibC();
@@ -69,9 +82,12 @@ pub fn build(b: *std.Build) void {
 
         const static_binding_test = b.addExecutable(.{
             .name = "static-binding-test",
-            .target = target,
-            .optimize = effective_optimize,
+            .root_module = b.createModule(.{ // <-- esto falta
+                .target = target,
+                .optimize = effective_optimize,
+            }),
         });
+
         static_binding_test.linkLibC();
         static_binding_test.addIncludePath(b.path("include"));
         static_binding_test.addCSourceFile(.{ .file = b.path("examples/fruits.c"), .flags = &[_][]const u8{ "-Wall", "-Wextra", "-pedantic", "-std=c99", "-D_POSIX_C_SOURCE=199309L" } });
@@ -90,21 +106,32 @@ pub fn build(b: *std.Build) void {
     if (target.query.isNative()) {
         const dynamic_lib_name = "coyote";
 
-        const dynamic_lib = b.addSharedLibrary(.{
-            .name = dynamic_lib_name,
+        const dyn_lib_module = b.createModule(.{
             .root_source_file = b.path("src/c_api.zig"),
             .target = target,
             .optimize = effective_optimize,
         });
+
+        const dynamic_lib = b.addLibrary(.{
+            .name = dynamic_lib_name,
+            .root_module = dyn_lib_module,
+            .linkage = .dynamic,
+        });
+
         dynamic_lib.linkLibC();
         b.installArtifact(dynamic_lib);
         b.default_step.dependOn(&dynamic_lib.step);
 
-        const dynamic_binding_test = b.addExecutable(.{
-            .name = "dynamic-binding-test",
+        const test_dyn_lib_module = b.createModule(.{
             .target = target,
             .optimize = effective_optimize,
         });
+
+        const dynamic_binding_test = b.addExecutable(.{
+            .name = "dynamic-binding-test",
+            .root_module = test_dyn_lib_module,
+        });
+
         dynamic_binding_test.linkLibC();
         dynamic_binding_test.addIncludePath(b.path("include"));
         dynamic_binding_test.addCSourceFile(.{ .file = b.path("examples/fruits.c"), .flags = &[_][]const u8{ "-Wall", "-Wextra", "-pedantic", "-std=c99", "-D_POSIX_C_SOURCE=199309L" } });

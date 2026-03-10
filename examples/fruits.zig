@@ -117,14 +117,12 @@ pub fn Harvest(world: *World) void {
                 try component.set(Components.Orange, .{ .harvested = true });
                 i += 1;
             }
-        }
-        if (component.is(Components.Apple)) {
+        } else if (component.is(Components.Apple)) {
             if (Cast(Components.Apple, component).ripe == true) {
                 try component.set(Components.Apple, .{ .harvested = true });
                 i += 1;
             }
-        }
-        if (component.is(Components.Pear)) {
+        } else if (component.is(Components.Pear)) {
             if (Cast(Components.Pear, component).ripe == true) {
                 try component.set(Components.Pear, .{ .harvested = true });
                 i += 1;

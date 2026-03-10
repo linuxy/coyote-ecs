@@ -497,7 +497,7 @@ pub const _Components = struct {
         component.id = ctx.free_idx;
         component.alive = true;
         component.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
-        component.type_node = .{ .data = component };
+        component.type_node = .{}; // ! .{ .data = component };
         component.chunk = ctx.chunk;
         component.data = null;
         component.allocated = false;
@@ -552,7 +552,7 @@ pub const _Components = struct {
         component.id = ctx.free_idx;
         component.alive = true;
         component.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
-        component.type_node = .{ .data = component };
+        component.type_node = .{}; // .{ .data = component };
         component.chunk = ctx.chunk;
         component.data = null;
         component.allocated = false;
@@ -668,7 +668,7 @@ pub const Component = struct {
     typeId: ?u32 = undefined,
     allocated: bool = false,
     alive: bool = false,
-    type_node: std.DoublyLinkedList(*Component).Node,
+    type_node: std.DoublyLinkedList.Node, // (*Component)
     magic: usize = MAGIC,
 
     pub inline fn is(self: *const Component, comp_type: anytype) bool {

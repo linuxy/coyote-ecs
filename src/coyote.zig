@@ -288,7 +288,7 @@ pub const SuperComponents = struct {
                         const mod = idx / CHUNK_SIZE;
                         component_indices[i] = @intCast(rem);
                         //owner_checks[i] = it.world._entities[idx].component_mask[it.filter_type].isSet(it.entity.id);
-                        owner_checks[i] = it.world._components[mod].sparse[rem].owners.isSet(it.entity.id);
+                        owner_checks[i] = it.world._components[mod].sparse[rem].owners.contains(entityGlobalId(it.entity));
                     }
                 }
 
@@ -496,7 +496,7 @@ pub const _Components = struct {
         component.typeId = typeToId(comp_type);
         component.id = ctx.free_idx;
         component.alive = true;
-        component.owners = std.StaticBitSet(CHUNK_SIZE).empty;
+        component.owners = .{};
         component.type_node = .{};
         component.chunk = ctx.chunk;
         component.data = null;
@@ -551,7 +551,7 @@ pub const _Components = struct {
         component.typeId = typeToIdC(comp_type);
         component.id = ctx.free_idx;
         component.alive = true;
-        component.owners = std.StaticBitSet(CHUNK_SIZE).empty;
+        component.owners = .{};
         component.type_node = .{};
         component.chunk = ctx.chunk;
         component.data = null;
@@ -658,12 +658,75 @@ pub const World = struct {
     }
 };
 
+//Globally unique entity identity = chunk * CHUNK_SIZE + per-chunk id.
+//Used as the key for component ownership so it is unambiguous across the
+//multiple entity chunks a world may grow into.
+pub inline fn entityGlobalId(entity: *const Entity) u64 {
+    return @as(u64, @intCast(entity.chunk)) * CHUNK_SIZE + @as(u64, entity.id);
+}
+
+//Tracks which entities own a component, keyed by global entity id.
+//Optimized for the common single-owner case: the first owner is stored inline
+//and no allocation happens until a component is shared by a second entity.
+pub const OwnerSet = struct {
+    const none: u64 = std.math.maxInt(u64);
+
+    len: u32 = 0,
+    first: u64 = none,
+    rest: std.ArrayListUnmanaged(u64) = .empty,
+
+    pub inline fn count(self: *const OwnerSet) u32 {
+        return self.len;
+    }
+
+    pub fn contains(self: *const OwnerSet, gid: u64) bool {
+        if (self.len == 0) return false;
+        if (self.first == gid) return true;
+        for (self.rest.items) |o| {
+            if (o == gid) return true;
+        }
+        return false;
+    }
+
+    pub fn add(self: *OwnerSet, alloc: std.mem.Allocator, gid: u64) !void {
+        if (self.contains(gid)) return;
+        if (self.len == 0) {
+            self.first = gid;
+        } else {
+            try self.rest.append(alloc, gid);
+        }
+        self.len += 1;
+    }
+
+    pub fn remove(self: *OwnerSet, gid: u64) void {
+        if (self.len == 0) return;
+        if (self.first == gid) {
+            self.first = self.rest.pop() orelse none;
+            self.len -= 1;
+            return;
+        }
+        for (self.rest.items, 0..) |o, i| {
+            if (o == gid) {
+                _ = self.rest.swapRemove(i);
+                self.len -= 1;
+                return;
+            }
+        }
+    }
+
+    pub fn clear(self: *OwnerSet, alloc: std.mem.Allocator) void {
+        self.rest.clearAndFree(alloc);
+        self.first = none;
+        self.len = 0;
+    }
+};
+
 pub const Component = struct {
     chunk: usize,
     id: u32,
     data: ?*anyopaque,
     world: ?*anyopaque,
-    owners: std.StaticBitSet(CHUNK_SIZE),
+    owners: OwnerSet = .{},
     attached: bool,
     typeId: ?u32 = undefined,
     allocated: bool = false,
@@ -694,10 +757,11 @@ pub const Component = struct {
 
     //Detaches from all entities
     pub inline fn detach(self: *Component) void {
+        const world = @as(*World, @ptrCast(@alignCast(self.world)));
 
         //TODO: Entities mask TBD
         self.attached = false;
-        self.owners = std.StaticBitSet(CHUNK_SIZE).empty;
+        self.owners.clear(world.allocator);
     }
 
     pub inline fn dealloc(self: *Component) void {
@@ -715,7 +779,7 @@ pub const Component = struct {
         //TODO: Destroy data? If allocated just hold to reuse.
         if (self.alive and self.magic == MAGIC) {
             self.attached = false;
-            self.owners = std.StaticBitSet(CHUNK_SIZE).empty;
+            self.owners.clear(world.allocator);
             self.alive = false;
 
             if (world._components[self.chunk].alive > 0)
@@ -750,12 +814,11 @@ pub const Entity = struct {
 
     //Runtime (type-id) variant of getOneComponent, used by the C API.
     //
-    //Scans for a live component of `filter_type` owned by this entity.
-    //NOTE: ownership is tracked by entity id within a chunk, so in worlds with
-    //more than one entity chunk an id collision across chunks could match; a
-    //chunk-aware ownership encoding is a future improvement.
+    //Scans for a live component of `filter_type` owned by this entity. Ownership
+    //is keyed by global entity id, so it is exact across multiple entity chunks.
     pub inline fn getOneComponentById(ctx: *Entity, filter_type: u32) ?*Component {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const gid = entityGlobalId(ctx);
         var ci: usize = 0;
         while (ci < world.components_len) : (ci += 1) {
             const chunk = &world._components[ci];
@@ -764,7 +827,7 @@ pub const Entity = struct {
                 const component = &chunk.sparse[si];
                 if (!component.alive) continue;
                 const tid = component.typeId orelse continue;
-                if (tid == filter_type and component.owners.isSet(ctx.id))
+                if (tid == filter_type and component.owners.contains(gid))
                     return component;
             }
         }
@@ -834,7 +897,7 @@ pub const Entity = struct {
 
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
         world._components[component.chunk].entity_mask[@as(usize, @intCast(component.typeId.?))].setValue(self.id, true);
-        component.owners.setValue(self.id, true);
+        try component.owners.add(world.allocator, entityGlobalId(self));
     }
 
     pub fn attach_c(self: *Entity, component: *Component, comp_type: *c_type) !void {
@@ -868,14 +931,14 @@ pub const Entity = struct {
 
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
         world._components[component.chunk].entity_mask[@as(usize, @intCast(component.typeId.?))].setValue(self.id, true);
-        component.owners.setValue(self.id, true);
+        try component.owners.add(world.allocator, entityGlobalId(self));
     }
 
     pub inline fn detach(self: *Entity, component: *Component) !void {
         var world = @as(*World, @ptrCast(@alignCast(self.world)));
 
         component.attached = false;
-        component.owners.setValue(self.id, false);
+        component.owners.remove(entityGlobalId(self));
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, false);
     }
 
@@ -1192,4 +1255,59 @@ pub const Systems = struct {
 pub fn opaqueDestroy(self: std.mem.Allocator, ptr: anytype, sz: usize, alignment: u8) void {
     const non_const_ptr = @as([*]u8, @ptrFromInt(@intFromPtr(ptr)));
     self.rawFree(non_const_ptr[0..sz], .fromByteUnits(alignment), @returnAddress());
+}
+
+test "ownership is exact across multiple entity chunks" {
+    const A = struct { v: u32 = 0 };
+    const B = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    // Create enough entities to span more than one chunk so local ids repeat.
+    const total = CHUNK_SIZE + 10;
+    var entities: [total]*Entity = undefined;
+    var i: usize = 0;
+    while (i < total) : (i += 1) entities[i] = try world.entities.create();
+
+    // Two entities sharing the same per-chunk id (5) but in different chunks.
+    const e0 = entities[5]; // chunk 0, id 5
+    const e1 = entities[CHUNK_SIZE + 5]; // chunk 1, id 5
+    try std.testing.expect(e0.chunk != e1.chunk);
+    try std.testing.expectEqual(e0.id, e1.id);
+
+    _ = try e0.addComponent(A{ .v = 1 });
+    _ = try e1.addComponent(B{ .v = 2 });
+
+    // Exactness: neither entity should be seen as owning the other's component.
+    try std.testing.expect(e0.has(A));
+    try std.testing.expect(!e0.has(B));
+    try std.testing.expect(e1.has(B));
+    try std.testing.expect(!e1.has(A));
+
+    // Typed get returns the right data.
+    try std.testing.expectEqual(@as(u32, 1), e0.get(A).?.v);
+    try std.testing.expectEqual(@as(u32, 2), e1.get(B).?.v);
+
+    // Query [A] yields exactly e0; query [B] yields exactly e1.
+    var count_a: usize = 0;
+    var qa = world.entities.query(.{A});
+    while (qa.next()) |e| {
+        try std.testing.expectEqual(e0, e);
+        count_a += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count_a);
+
+    var count_b: usize = 0;
+    var qb = world.entities.query(.{B});
+    while (qb.next()) |e| {
+        try std.testing.expectEqual(e1, e);
+        count_b += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), count_b);
+
+    // remove clears ownership exactly.
+    try e0.remove(A);
+    try std.testing.expect(!e0.has(A));
+    try std.testing.expect(e1.has(B));
 }

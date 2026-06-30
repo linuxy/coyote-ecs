@@ -61,6 +61,20 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("tests", "Run library tests");
     test_step.dependOn(&main_tests.step);
 
+    // Zig unit tests (in-source `test` blocks).
+    const unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/coyote.zig"),
+            .target = target,
+            .optimize = effective_optimize,
+            .link_libc = true,
+        }),
+    });
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    const unit_test_step = b.step("test-unit", "Run Zig unit tests");
+    unit_test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_unit_tests.step);
+
     const test_install = b.option(
         bool,
         "install-tests",

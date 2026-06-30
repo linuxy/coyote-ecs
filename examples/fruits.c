@@ -62,8 +62,14 @@ int main(void) {
     apple* a1 = coyote_component_get(c_apple); a1->color = 255; a1->ripe = 0; a1->harvested = 0;
     printf("Got and assigned an apple component @%d\n", a1);
 
-    coyote_entity_detach(e_apple, c_apple);
-    coyote_component_destroy(c_apple);
+    //Entity accessors: has / get / remove
+    printf("Apple entity has apple component: %d\n", coyote_entity_has(e_apple, t_apple));
+    apple* a2 = coyote_entity_get(e_apple, t_apple);
+    if(a2)
+        printf("Got apple via coyote_entity_get: color=%d\n", a2->color);
+    coyote_entity_remove(e_apple, t_apple);
+    printf("Apple entity has apple component after remove: %d\n", coyote_entity_has(e_apple, t_apple));
+
     coyote_entity_destroy(e_apple);
     coyote_entity_destroy(e_pear);
 

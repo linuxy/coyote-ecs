@@ -105,6 +105,38 @@ export fn coyote_entity_detach(entity_ptr: usize, component_ptr: usize) c_int {
     return 0;
 }
 
+export fn coyote_entity_has(entity_ptr: usize, c_type: coyote.c_type) c_int {
+    if (entity_ptr == 0) {
+        std.log.err("Invalid entity.", .{});
+        return 0;
+    }
+
+    const entity = @as(*coyote.Entity, @ptrFromInt(entity_ptr));
+    return if (entity.hasById(coyote.typeToIdC(c_type))) 1 else 0;
+}
+
+export fn coyote_entity_get(entity_ptr: usize, c_type: coyote.c_type) ?*anyopaque {
+    if (entity_ptr == 0) {
+        std.log.err("Invalid entity.", .{});
+        return null;
+    }
+
+    const entity = @as(*coyote.Entity, @ptrFromInt(entity_ptr));
+    const component = entity.getOneComponentById(coyote.typeToIdC(c_type)) orelse return null;
+    return component.data;
+}
+
+export fn coyote_entity_remove(entity_ptr: usize, c_type: coyote.c_type) c_int {
+    if (entity_ptr == 0) {
+        std.log.err("Invalid entity.", .{});
+        return 1;
+    }
+
+    const entity = @as(*coyote.Entity, @ptrFromInt(entity_ptr));
+    entity.removeById(coyote.typeToIdC(c_type)) catch return 1;
+    return 0;
+}
+
 export fn coyote_component_detach(component_ptr: usize) c_int {
     if (component_ptr == 0) {
         std.log.err("Invalid component.", .{});

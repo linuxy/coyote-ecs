@@ -74,10 +74,19 @@ pub fn main() !void {
 
     _ = try aPear.addComponent(Components.Pear{ .color = 1, .ripe = false, .harvested = false });
 
-    if (aPear.getOneComponent(Components.Pear) != null)
+    //Entity accessors: has / get / remove
+    if (aPear.has(Components.Pear))
         std.log.info("Pear entities: >= 1", .{})
     else
         std.log.info("Pear entities: 0", .{});
+
+    if (aPear.get(Components.Pear)) |pear| {
+        pear.ripe = true;
+        std.log.info("Pear ripe via get(): {}", .{pear.ripe});
+    }
+
+    try aPear.remove(Components.Pear);
+    std.log.info("Pear present after remove(): {}", .{aPear.has(Components.Pear)});
 
     try Systems.run(Grow, .{world});
     try Systems.run(Harvest, .{world});

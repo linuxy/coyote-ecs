@@ -358,10 +358,14 @@ pub const SuperComponents = struct {
     }
 
     pub fn iteratorFilterByEntity(ctx: *SuperComponents, entity: *Entity, comptime comp_type: type) SuperComponents.MaskedEntityIterator {
-        //get an iterator for components attached to this entity
+        return ctx.iteratorFilterByEntityType(entity, typeToId(comp_type));
+    }
+
+    pub fn iteratorFilterByEntityType(ctx: *SuperComponents, entity: *Entity, filter_type: u32) SuperComponents.MaskedEntityIterator {
+        //get an iterator for components of a given type id attached to this entity
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const components = &world._components;
-        return .{ .ctx = components, .filter_type = typeToId(comp_type), .components_alive = ctx.alive, .entities_alive = world.entities.alive, .world = world, .entity = entity };
+        return .{ .ctx = components, .filter_type = filter_type, .components_alive = ctx.alive, .entities_alive = world.entities.alive, .world = world, .entity = entity };
     }
 };
 
@@ -675,6 +679,12 @@ pub const Component = struct {
         }
     }
 
+    //Returns a typed pointer to this component's data, or null if it has none.
+    pub inline fn get(self: *const Component, comptime comp_type: type) ?*comp_type {
+        if (self.data) |data| return CastData(comp_type, data);
+        return null;
+    }
+
     pub inline fn set(component: *Component, comptime comp_type: type, members: anytype) !void {
         const field_ptr = @as(*comp_type, @ptrCast(@alignCast(component.data)));
         inline for (@typeInfo(@TypeOf(members)).@"struct".field_names) |name| {
@@ -735,10 +745,46 @@ pub const Entity = struct {
     }
 
     pub inline fn getOneComponent(ctx: *Entity, comptime comp_type: type) ?*const Component {
+        return ctx.getOneComponentById(typeToId(comp_type));
+    }
+
+    //Runtime (type-id) variant of getOneComponent, used by the C API.
+    pub inline fn getOneComponentById(ctx: *Entity, filter_type: u32) ?*Component {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        var it = world.components.iteratorFilterByEntity(ctx, comp_type);
-        const next = it.next();
-        return next;
+        var it = world.components.iteratorFilterByEntityType(ctx, filter_type);
+        return it.next();
+    }
+
+    //Returns true if this entity owns at least one component of the given type.
+    pub inline fn has(ctx: *Entity, comptime comp_type: type) bool {
+        return ctx.hasById(typeToId(comp_type));
+    }
+
+    //Runtime (type-id) variant of has, used by the C API.
+    pub inline fn hasById(ctx: *Entity, filter_type: u32) bool {
+        return ctx.getOneComponentById(filter_type) != null;
+    }
+
+    //Returns a typed pointer to the data of one component of the given type
+    //owned by this entity, or null if it has none.
+    pub inline fn get(ctx: *Entity, comptime comp_type: type) ?*comp_type {
+        const component = ctx.getOneComponentById(typeToId(comp_type)) orelse return null;
+        return component.get(comp_type);
+    }
+
+    //Detaches every component of the given type from this entity. Any component
+    //left without owners is destroyed so its slot can be reused (run gc to free).
+    pub fn remove(ctx: *Entity, comptime comp_type: type) !void {
+        return ctx.removeById(typeToId(comp_type));
+    }
+
+    //Runtime (type-id) variant of remove, used by the C API.
+    pub fn removeById(ctx: *Entity, filter_type: u32) !void {
+        while (ctx.getOneComponentById(filter_type)) |component| {
+            try ctx.detach(component);
+            if (component.owners.count() == 0)
+                component.destroy();
+        }
     }
 
     pub fn attach(self: *Entity, component: *Component, comp_type: anytype) !void {

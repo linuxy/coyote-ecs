@@ -46,6 +46,8 @@ component coyote_components_iterator_filter_next(iterator iterator);
 entity coyote_entities_iterator_filter_next(iterator iterator);
 iterator coyote_components_iterator_filter_range(world world, coyote_type type, size_t start_idx, size_t end_idx);
 component coyote_components_iterator_filter_range_next(iterator iterator);
+iterator coyote_entities_query(world world, const coyote_type* include, size_t include_n, const coyote_type* exclude, size_t exclude_n);
+entity coyote_entities_query_next(iterator iterator);
 void coyote_components_gc(world world);
 int coyote_components_count(world world);
 int coyote_entities_count(world world);

@@ -67,6 +67,15 @@ int main(void) {
     apple* a2 = coyote_entity_get(e_apple, t_apple);
     if(a2)
         printf("Got apple via coyote_entity_get: color=%d\n", a2->color);
+
+    //Multi-component query: entities owning an apple component (and no orange)
+    coyote_type q_include[1] = { t_apple };
+    coyote_type q_exclude[1] = { t_orange };
+    iterator q = coyote_entities_query(world, q_include, 1, q_exclude, 1);
+    int q_count = 0;
+    while(coyote_entities_query_next(q)) q_count++;
+    printf("Query [apple WITHOUT orange] entities: %d\n", q_count);
+
     coyote_entity_remove(e_apple, t_apple);
     printf("Apple entity has apple component after remove: %d\n", coyote_entity_has(e_apple, t_apple));
 

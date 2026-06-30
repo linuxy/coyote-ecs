@@ -46,6 +46,31 @@ pub fn main() !void {
     try anOrange.attach(orangeComponent, Components.Orange{ .color = 0, .ripe = false, .harvested = false });
     try anApple.attach(appleComponent, Components.Apple{ .color = 0, .ripe = false, .harvested = false });
 
+    //Multi-component queries. Build a small isolated scenario, then clean it up.
+    var combo = try world.entities.create();
+    _ = try combo.addComponent(Components.Orange{});
+    _ = try combo.addComponent(Components.Apple{});
+
+    var only_orange: usize = 0;
+    var q1 = world.entities.query(.{Components.Orange});
+    while (q1.next()) |_| only_orange += 1;
+    std.log.info("Query [Orange]: {} (anOrange + combo)", .{only_orange});
+
+    var both: usize = 0;
+    var q2 = world.entities.query(.{ Components.Orange, Components.Apple });
+    while (q2.next()) |_| both += 1;
+    std.log.info("Query [Orange AND Apple]: {} (combo)", .{both});
+
+    var orange_not_apple: usize = 0;
+    var q3 = world.entities.queryExclude(.{Components.Orange}, .{Components.Apple});
+    while (q3.next()) |_| orange_not_apple += 1;
+    std.log.info("Query [Orange WITHOUT Apple]: {} (anOrange)", .{orange_not_apple});
+
+    try combo.remove(Components.Orange);
+    try combo.remove(Components.Apple);
+    combo.destroy();
+    world.components.gc();
+
     //Create 50k entities and attach 50k unique components
     var i: usize = 0;
     while (i < 50000) : (i += 1) {

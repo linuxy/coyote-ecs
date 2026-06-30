@@ -749,10 +749,26 @@ pub const Entity = struct {
     }
 
     //Runtime (type-id) variant of getOneComponent, used by the C API.
+    //
+    //Scans for a live component of `filter_type` owned by this entity.
+    //NOTE: ownership is tracked by entity id within a chunk, so in worlds with
+    //more than one entity chunk an id collision across chunks could match; a
+    //chunk-aware ownership encoding is a future improvement.
     pub inline fn getOneComponentById(ctx: *Entity, filter_type: u32) ?*Component {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        var it = world.components.iteratorFilterByEntityType(ctx, filter_type);
-        return it.next();
+        var ci: usize = 0;
+        while (ci < world.components_len) : (ci += 1) {
+            const chunk = &world._components[ci];
+            var si: usize = 0;
+            while (si < CHUNK_SIZE) : (si += 1) {
+                const component = &chunk.sparse[si];
+                if (!component.alive) continue;
+                const tid = component.typeId orelse continue;
+                if (tid == filter_type and component.owners.isSet(ctx.id))
+                    return component;
+            }
+        }
+        return null;
     }
 
     //Returns true if this entity owns at least one component of the given type.
@@ -884,9 +900,10 @@ pub const Entity = struct {
 
 //Do not inline
 pub fn typeToId(comptime T: type) u32 {
-    const longId = @as(usize, @intCast(@intFromPtr(&struct {
-        var x: u8 = 0;
-    }.x)));
+    //Stable, unique-per-type key. The type name is interned once per distinct
+    //type, so its pointer is a reliable identity (the previous &struct{var x}
+    //trick collapsed all types to one address because it never captured T).
+    const longId = @intFromPtr(@typeName(T).ptr);
 
     var found = false;
     var i: usize = 0;
@@ -1040,6 +1057,82 @@ pub const SuperEntities = struct {
         //TODO: Go through each chunk
         //get an iterator for entities attached to this entity
         return .{ .ctx = entities, .filter_type = typeToId(comp_type), .alive = world.components.alive, .world = world };
+    }
+
+    //Multi-component query: yields entities that own a component of every
+    //`include` type and none of the `exclude` types.
+    //
+    //This is a linear (non-archetype) scan: each candidate entity is tested
+    //with `Entity.hasById` per filter type, so cost scales with
+    //entities * filter_types * components. Fine for modest worlds; an
+    //archetype/cached implementation is a future optimization.
+    pub const QueryIterator = struct {
+        ctx: *[]Entities,
+        world: *World,
+        total: usize = 0,
+        index: usize = 0,
+        include_ids: [MAX_COMPONENTS]u32 = undefined,
+        include_len: usize = 0,
+        exclude_ids: [MAX_COMPONENTS]u32 = undefined,
+        exclude_len: usize = 0,
+
+        pub fn next(it: *QueryIterator) ?*Entity {
+            while (it.index < it.total) : (it.index += 1) {
+                const mod = it.index / CHUNK_SIZE;
+                const rem = @rem(it.index, CHUNK_SIZE);
+                const entity = &it.ctx.*[mod].sparse[rem];
+                if (!entity.alive) continue;
+
+                var match = true;
+                for (it.include_ids[0..it.include_len]) |tid| {
+                    if (!entity.hasById(tid)) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    for (it.exclude_ids[0..it.exclude_len]) |tid| {
+                        if (entity.hasById(tid)) {
+                            match = false;
+                            break;
+                        }
+                    }
+                }
+                if (match) {
+                    it.index += 1;
+                    return entity;
+                }
+            }
+
+            return null;
+        }
+    };
+
+    fn newQuery(ctx: *SuperEntities) SuperEntities.QueryIterator {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return .{ .ctx = &world._entities, .world = world, .total = CHUNK_SIZE * world.entities_len };
+    }
+
+    //Query entities owning a component of every type in the `include` tuple,
+    //e.g. `world.entities.query(.{ Apple, Orange })`.
+    pub fn query(ctx: *SuperEntities, comptime include: anytype) SuperEntities.QueryIterator {
+        var it = ctx.newQuery();
+        inline for (include) |T| {
+            it.include_ids[it.include_len] = typeToId(T);
+            it.include_len += 1;
+        }
+        return it;
+    }
+
+    //As `query`, but also excludes entities owning any type in `exclude`,
+    //e.g. `world.entities.queryExclude(.{ Apple }, .{ Orange })`.
+    pub fn queryExclude(ctx: *SuperEntities, comptime include: anytype, comptime exclude: anytype) SuperEntities.QueryIterator {
+        var it = ctx.query(include);
+        inline for (exclude) |T| {
+            it.exclude_ids[it.exclude_len] = typeToId(T);
+            it.exclude_len += 1;
+        }
+        return it;
     }
 };
 

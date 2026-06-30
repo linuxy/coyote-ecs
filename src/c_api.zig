@@ -201,6 +201,40 @@ export fn coyote_entities_iterator_next(iterator_ptr: usize) usize {
     }
 }
 
+export fn coyote_entities_query(world_ptr: usize, include: [*c]const coyote.c_type, include_n: usize, exclude: [*c]const coyote.c_type, exclude_n: usize) usize {
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    const iterator = coyote.allocator.create(coyote.SuperEntities.QueryIterator) catch unreachable;
+    iterator.* = coyote.SuperEntities.QueryIterator{
+        .ctx = &world._entities,
+        .world = world,
+        .total = coyote.CHUNK_SIZE * world.entities_len,
+    };
+
+    var i: usize = 0;
+    while (i < include_n and iterator.include_len < coyote.MAX_COMPONENTS) : (i += 1) {
+        iterator.include_ids[iterator.include_len] = coyote.typeToIdC(include[i]);
+        iterator.include_len += 1;
+    }
+
+    i = 0;
+    while (i < exclude_n and iterator.exclude_len < coyote.MAX_COMPONENTS) : (i += 1) {
+        iterator.exclude_ids[iterator.exclude_len] = coyote.typeToIdC(exclude[i]);
+        iterator.exclude_len += 1;
+    }
+
+    return @intFromPtr(iterator);
+}
+
+export fn coyote_entities_query_next(iterator_ptr: usize) usize {
+    const iterator = @as(*coyote.SuperEntities.QueryIterator, @ptrFromInt(iterator_ptr));
+    if (iterator.next()) |entity| {
+        return @intFromPtr(entity);
+    } else {
+        coyote.allocator.destroy(iterator);
+        return 0;
+    }
+}
+
 export fn coyote_entities_iterator_filter(world_ptr: usize, c_type: coyote.c_type) usize {
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
     const entities = &world._entities;

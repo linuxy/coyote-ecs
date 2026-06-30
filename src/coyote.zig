@@ -587,6 +587,12 @@ pub const World = struct {
         return CommandBuffer.init(self);
     }
 
+    //Returns a fresh staged system scheduler bound to this world. Caller owns it
+    //and must call `deinit()` when done.
+    pub fn scheduler(self: *World) Scheduler {
+        return Scheduler.init(self);
+    }
+
     pub fn destroy(self: *World) void {
         var it = self.components.iterator();
         while (it.next()) |component|
@@ -1575,6 +1581,90 @@ pub const CommandBuffer = struct {
     }
 };
 
+//What every system receives: the world to read/iterate, and a command buffer to
+//record structural changes into. The scheduler owns the command buffer and
+//flushes it at stage boundaries, so a system can safely spawn/despawn/attach
+//while iterating without corrupting the iteration in progress.
+pub const SystemContext = struct {
+    world: *World,
+    commands: *CommandBuffer,
+};
+
+//A simple ordered, staged system runner. Systems are grouped into stages; stages
+//execute in creation order, and within a stage systems run in registration
+//order. The shared command buffer is flushed at the end of each stage, so
+//structural changes a stage records become visible to later stages but never
+//mid-stage. This is the minimal backbone a game/sim loop is built on; resources
+//(shared singletons) are a natural future addition to SystemContext.
+pub const Scheduler = struct {
+    pub const SystemFn = *const fn (*SystemContext) anyerror!void;
+
+    //C-ABI system callback: (world_ptr, command_buffer_ptr, user_data).
+    pub const CSystemFn = *const fn (usize, usize, ?*anyopaque) callconv(.c) void;
+
+    const System = union(enum) {
+        zig: SystemFn,
+        c: struct { cb: CSystemFn, user_data: ?*anyopaque },
+    };
+
+    const Stage = struct {
+        systems: std.ArrayListUnmanaged(System) = .empty,
+    };
+
+    world: *World,
+    commands: CommandBuffer,
+    stages: std.ArrayListUnmanaged(Stage) = .empty,
+
+    pub fn init(world: *World) Scheduler {
+        return .{ .world = world, .commands = CommandBuffer.init(world) };
+    }
+
+    pub fn deinit(self: *Scheduler) void {
+        for (self.stages.items) |*s| s.systems.deinit(self.world.allocator);
+        self.stages.deinit(self.world.allocator);
+        self.commands.deinit();
+    }
+
+    //Appends a new (empty) stage and returns its id. Stages run in id order.
+    pub fn addStage(self: *Scheduler) !usize {
+        const id = self.stages.items.len;
+        try self.stages.append(self.world.allocator, .{});
+        return id;
+    }
+
+    fn ensureStage(self: *Scheduler, stage: usize) !void {
+        while (self.stages.items.len <= stage)
+            try self.stages.append(self.world.allocator, .{});
+    }
+
+    //Registers a Zig system into `stage` (intermediate stages are created as
+    //needed so addSystem(0, ...) works without an explicit addStage).
+    pub fn addSystem(self: *Scheduler, stage: usize, system: SystemFn) !void {
+        try self.ensureStage(stage);
+        try self.stages.items[stage].systems.append(self.world.allocator, .{ .zig = system });
+    }
+
+    //Registers a C-ABI system callback into `stage`.
+    pub fn addSystemC(self: *Scheduler, stage: usize, cb: CSystemFn, user_data: ?*anyopaque) !void {
+        try self.ensureStage(stage);
+        try self.stages.items[stage].systems.append(self.world.allocator, .{ .c = .{ .cb = cb, .user_data = user_data } });
+    }
+
+    //Runs every stage in order, flushing recorded commands after each stage.
+    pub fn run(self: *Scheduler) !void {
+        var ctx = SystemContext{ .world = self.world, .commands = &self.commands };
+        for (self.stages.items) |*stage| {
+            for (stage.systems.items) |system| {
+                switch (system) {
+                    .zig => |f| try f(&ctx),
+                    .c => |c| c.cb(@intFromPtr(self.world), @intFromPtr(&self.commands), c.user_data),
+                }
+            }
+            try self.commands.flush();
+        }
+    }
+};
+
 pub fn opaqueDestroy(self: std.mem.Allocator, ptr: anytype, sz: usize, alignment: u8) void {
     const non_const_ptr = @as([*]u8, @ptrFromInt(@intFromPtr(ptr)));
     self.rawFree(non_const_ptr[0..sz], .fromByteUnits(alignment), @returnAddress());
@@ -1838,4 +1928,70 @@ test "command buffer skips commands targeting an entity destroyed earlier in the
 
     try std.testing.expectEqual(@as(u32, 0), world.entities.count());
     try std.testing.expectEqual(@as(u32, 0), world.components.count());
+}
+
+test "scheduler runs stages and systems in order" {
+    const S = struct {
+        var log: u32 = 0;
+        fn a(ctx: *SystemContext) anyerror!void {
+            _ = ctx;
+            log = log * 10 + 1;
+        }
+        fn b(ctx: *SystemContext) anyerror!void {
+            _ = ctx;
+            log = log * 10 + 2;
+        }
+        fn c(ctx: *SystemContext) anyerror!void {
+            _ = ctx;
+            log = log * 10 + 3;
+        }
+    };
+    S.log = 0;
+
+    var world = try World.create();
+    defer world.destroy();
+
+    var sched = world.scheduler();
+    defer sched.deinit();
+
+    // Stage 0 runs a then b (registration order); stage 1 runs c.
+    try sched.addSystem(0, S.a);
+    try sched.addSystem(0, S.b);
+    try sched.addSystem(1, S.c);
+
+    try sched.run();
+    try std.testing.expectEqual(@as(u32, 123), S.log);
+}
+
+test "scheduler flushes commands between stages" {
+    const A = struct { v: u32 = 0 };
+    const S = struct {
+        var seen_before: u32 = 0;
+        var seen_after: u32 = 0;
+        fn spawn(ctx: *SystemContext) anyerror!void {
+            // Record a spawn; it must NOT be visible within this stage.
+            const e = try ctx.commands.createEntity();
+            try ctx.commands.attachDeferred(e, A{ .v = 1 });
+            seen_before = ctx.world.entities.count();
+        }
+        fn observe(ctx: *SystemContext) anyerror!void {
+            // Stage 1 runs after the stage-0 flush, so the spawn is visible.
+            seen_after = ctx.world.entities.count();
+        }
+    };
+    S.seen_before = 0;
+    S.seen_after = 0;
+
+    var world = try World.create();
+    defer world.destroy();
+
+    var sched = world.scheduler();
+    defer sched.deinit();
+
+    try sched.addSystem(0, S.spawn);
+    try sched.addSystem(1, S.observe);
+    try sched.run();
+
+    try std.testing.expectEqual(@as(u32, 0), S.seen_before); // not visible mid-stage
+    try std.testing.expectEqual(@as(u32, 1), S.seen_after); // visible next stage
 }

@@ -4,6 +4,7 @@ const ecs = @import("coyote-ecs");
 const World = ecs.World;
 const Cast = ecs.Cast;
 const Systems = ecs.Systems;
+const SystemContext = ecs.SystemContext;
 
 //Name configured in ECS constants
 pub const Components = struct {
@@ -131,20 +132,31 @@ pub fn main() !void {
     std.log.info("Old handle resolves to recycled slot: {}", .{world.entities.resolve(handle) != null});
     recycled.destroy();
 
-    //Command buffer: record structural changes now, apply them all at flush.
-    var cb = world.commandBuffer();
-    defer cb.deinit();
-    const spawned = try cb.createEntity();
-    try cb.attachDeferred(spawned, Components.Apple{ .color = 7, .ripe = false, .harvested = false });
-    std.log.info("Entities before flush: {}", .{world.entities.count()});
-    try cb.flush();
-    std.log.info("Entities after flush: {}", .{world.entities.count()});
-    std.log.info("Apple entities after deferred spawn: {}", .{blk: {
-        var c: u32 = 0;
-        var qi = world.entities.iteratorFilter(Components.Apple);
-        while (qi.next()) |_| c += 1;
-        break :blk c;
-    }});
+    //Scheduler: a stage-0 system spawns entities (deferred), and a stage-1
+    //system observes them after the command buffer is flushed between stages.
+    var sched = world.scheduler();
+    defer sched.deinit();
+    try sched.addSystem(0, Spawn);
+    try sched.addSystem(1, Observe);
+    std.log.info("Entities before scheduler run: {}", .{world.entities.count()});
+    try sched.run();
+}
+
+//Stage 0: record a few deferred spawns via the command buffer.
+pub fn Spawn(ctx: *SystemContext) anyerror!void {
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        const e = try ctx.commands.createEntity();
+        try ctx.commands.attachDeferred(e, Components.Apple{ .color = 1, .ripe = false, .harvested = false });
+    }
+}
+
+//Stage 1: runs after the stage-0 flush, so the spawned entities are visible.
+pub fn Observe(ctx: *SystemContext) anyerror!void {
+    var count: u32 = 0;
+    var it = ctx.world.entities.iteratorFilter(Components.Apple);
+    while (it.next()) |_| count += 1;
+    std.log.info("Apple entities after scheduler run: {}", .{count});
 }
 
 pub fn Grow(world: *World) void {

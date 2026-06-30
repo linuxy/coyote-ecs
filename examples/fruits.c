@@ -24,6 +24,20 @@ static const coyote_type t_apple = COYOTE_MAKE_TYPE(0, apple);
 static const coyote_type t_orange = COYOTE_MAKE_TYPE(1, orange);
 static const coyote_type t_pear = COYOTE_MAKE_TYPE(2, pear);
 
+// Stage 0 system: record a deferred spawn into the command buffer.
+static void sys_spawn(world w, command_buffer cb, void* user_data) {
+    (void)user_data;
+    uint32_t e = coyote_cb_spawn(cb);
+    component c = coyote_component_create(w, t_orange);
+    coyote_cb_attach_deferred(cb, e, c, t_orange);
+}
+
+// Stage 1 system: runs after the stage-0 flush; reports the entity count.
+static void sys_count(world w, command_buffer cb, void* user_data) {
+    (void)cb;
+    *(int*)user_data = coyote_entities_count(w);
+}
+
 int main(void) {
     world world = coyote_world_create();
 
@@ -103,6 +117,15 @@ int main(void) {
     coyote_command_buffer_flush(cb);
     printf("Entities after flush: %d\n", coyote_entities_count(world));
     coyote_command_buffer_destroy(cb);
+
+    // Scheduler: stage 0 spawns (deferred), stage 1 observes after the flush.
+    scheduler sched = coyote_scheduler_create(world);
+    int observed = -1;
+    coyote_scheduler_add_system(sched, 0, sys_spawn, NULL);
+    coyote_scheduler_add_system(sched, 1, sys_count, &observed);
+    coyote_scheduler_run(sched);
+    printf("Entities observed by scheduler stage 1: %d\n", observed);
+    coyote_scheduler_destroy(sched);
 
     coyote_world_destroy(world);
     printf("World destroyed.\n");

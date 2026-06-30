@@ -77,6 +77,20 @@ int coyote_cb_attach_deferred(command_buffer cb, uint32_t placeholder, component
 int coyote_cb_remove(command_buffer cb, coyote_entity_ref handle, coyote_type type);
 int coyote_cb_remove_deferred(command_buffer cb, uint32_t placeholder, coyote_type type);
 
+// Scheduler: register systems into ordered stages and run them. The shared
+// command buffer is flushed after each stage, so structural changes a stage
+// records are visible to later stages but never mid-stage.
+typedef uintptr_t scheduler;
+// A system callback receives the world, a command buffer to record structural
+// changes into, and the user_data registered alongside it.
+typedef void (*coyote_system)(world world, command_buffer cb, void* user_data);
+
+scheduler coyote_scheduler_create(world world);
+void coyote_scheduler_destroy(scheduler sched);
+uint32_t coyote_scheduler_add_stage(scheduler sched);
+int coyote_scheduler_add_system(scheduler sched, uint32_t stage, coyote_system system, void* user_data);
+int coyote_scheduler_run(scheduler sched);
+
 #ifdef __cplusplus
 }
 #endif

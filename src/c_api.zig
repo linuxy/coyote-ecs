@@ -401,3 +401,44 @@ export fn coyote_cb_remove_deferred(cb_ptr: usize, placeholder: u32, c_type: coy
     const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
     return if (cb.cRemoveDeferred(placeholder, coyote.typeToIdC(c_type))) 0 else 1;
 }
+
+// --- Scheduler: ordered, staged system runner ---
+
+export fn coyote_scheduler_create(world_ptr: usize) usize {
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    const sched = coyote.allocator.create(coyote.Scheduler) catch return 0;
+    sched.* = coyote.Scheduler.init(world);
+    return @intFromPtr(sched);
+}
+
+export fn coyote_scheduler_destroy(sched_ptr: usize) void {
+    if (sched_ptr == 0) return;
+    const sched = @as(*coyote.Scheduler, @ptrFromInt(sched_ptr));
+    sched.deinit();
+    coyote.allocator.destroy(sched);
+}
+
+//Appends a new stage; returns its id (stages run in id order). Returns
+//UINT32_MAX on allocation failure.
+export fn coyote_scheduler_add_stage(sched_ptr: usize) u32 {
+    if (sched_ptr == 0) return std.math.maxInt(u32);
+    const sched = @as(*coyote.Scheduler, @ptrFromInt(sched_ptr));
+    const id = sched.addStage() catch return std.math.maxInt(u32);
+    return @intCast(id);
+}
+
+//Registers a C system callback into `stage`. The callback receives the world
+//pointer, command buffer pointer, and the user_data passed here.
+export fn coyote_scheduler_add_system(sched_ptr: usize, stage: u32, cb: coyote.Scheduler.CSystemFn, user_data: ?*anyopaque) c_int {
+    if (sched_ptr == 0) return 1;
+    const sched = @as(*coyote.Scheduler, @ptrFromInt(sched_ptr));
+    sched.addSystemC(stage, cb, user_data) catch return 1;
+    return 0;
+}
+
+export fn coyote_scheduler_run(sched_ptr: usize) c_int {
+    if (sched_ptr == 0) return 1;
+    const sched = @as(*coyote.Scheduler, @ptrFromInt(sched_ptr));
+    sched.run() catch return 1;
+    return 0;
+}

@@ -604,11 +604,257 @@ pub const Resources = struct {
     }
 };
 
+pub const EventKind = enum(u8) {
+    entity_spawned,
+    entity_destroyed,
+    component_added,
+    component_removed,
+    component_changed,
+};
+
+//A recorded structural lifecycle change. Queued by the world when entities and
+//components are created/destroyed/updated so systems can react later (e.g. in
+//an events stage after the scheduler flushes a command buffer).
+pub const StructuralEvent = struct {
+    kind: EventKind,
+    entity: EntityRef,
+    component: ?*Component = null,
+    type_id: u32 = 0,
+};
+
+//World event queue: structural lifecycle events plus typed custom payloads.
+pub const Events = struct {
+    const CustomEntry = struct {
+        type_id: u32,
+        data: *anyopaque,
+    };
+
+    queue: std.ArrayListUnmanaged(StructuralEvent) = .empty,
+    custom: std.ArrayListUnmanaged(CustomEntry) = .empty,
+    arena: std.heap.ArenaAllocator,
+    arena_inited: bool = false,
+
+    pub fn init(alloc: std.mem.Allocator) Events {
+        return .{
+            .arena = std.heap.ArenaAllocator.init(alloc),
+            .arena_inited = true,
+        };
+    }
+
+    pub fn deinit(self: *Events, alloc: std.mem.Allocator) void {
+        self.queue.deinit(alloc);
+        self.custom.deinit(alloc);
+        if (self.arena_inited) self.arena.deinit();
+    }
+
+    pub inline fn count(self: *const Events) usize {
+        return self.queue.items.len + self.custom.items.len;
+    }
+
+    pub fn push(self: *Events, alloc: std.mem.Allocator, event: StructuralEvent) !void {
+        try self.queue.append(alloc, event);
+    }
+
+    //Records a typed custom event. Payload is copied into the events arena.
+    pub fn emit(self: *Events, alloc: std.mem.Allocator, comptime T: type, value: T) !void {
+        const box = try self.arena.allocator().create(T);
+        box.* = value;
+        try self.custom.append(alloc, .{ .type_id = typeToId(T), .data = box });
+    }
+
+    pub fn cEmit(self: *Events, alloc: std.mem.Allocator, ct: c_type, data: *const anyopaque) !void {
+        const id = typeToIdC(ct);
+        const size = types_size[@intCast(id)];
+        const align_val = types_align[@intCast(id)];
+        const mem = self.arena.allocator().rawAlloc(size, .fromByteUnits(align_val), @returnAddress()) orelse return error.OutOfMemory;
+        @memcpy(mem[0..size], @as([*]const u8, @ptrCast(data))[0..size]);
+        try self.custom.append(alloc, .{ .type_id = id, .data = mem });
+    }
+
+    //Invokes `handler` for every queued structural event, then clears the
+    //structural queue. Custom events are left intact until `clearCustom` or
+    //`clearAll`.
+    pub fn drainStructural(self: *Events, handler: *const fn (StructuralEvent) void) void {
+        for (self.queue.items) |event| handler(event);
+        self.queue.clearRetainingCapacity();
+    }
+
+    //Invokes `handler` for every custom event of type `T`, then removes them.
+    pub fn drainCustom(self: *Events, comptime T: type, handler: *const fn (T) void) void {
+        const id = typeToId(T);
+        var i: usize = 0;
+        while (i < self.custom.items.len) {
+            if (self.custom.items[i].type_id == id) {
+                handler(@as(*T, @ptrCast(@alignCast(self.custom.items[i].data))).*);
+                _ = self.custom.orderedRemove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    pub fn clearCustom(self: *Events) void {
+        self.custom.clearRetainingCapacity();
+        _ = self.arena.reset(.retain_capacity);
+    }
+
+    pub fn clearAll(self: *Events) void {
+        self.queue.clearRetainingCapacity();
+        self.clearCustom();
+    }
+};
+
+//`type_id` value that matches every component type when registering observers.
+pub const observe_all: u32 = std.math.maxInt(u32);
+
+//Synchronous lifecycle callbacks. Unlike the event queue, observers run
+//immediately when a change is committed (including during command-buffer flush).
+pub const Observers = struct {
+    pub const EntityFn = *const fn (*World, *Entity) void;
+    pub const ComponentFn = *const fn (*World, *Entity, *Component, u32) void;
+    pub const CEntityFn = *const fn (usize, u64, ?*anyopaque) callconv(.c) void;
+    pub const CComponentFn = *const fn (usize, u64, usize, u32, ?*anyopaque) callconv(.c) void;
+
+    const EntityObserver = union(enum) {
+        zig: EntityFn,
+        c: struct { cb: CEntityFn, user_data: ?*anyopaque },
+    };
+
+    const ComponentObserver = struct {
+        type_id: u32,
+        observer: union(enum) {
+            zig: ComponentFn,
+            c: struct { cb: CComponentFn, user_data: ?*anyopaque },
+        },
+    };
+
+    entity_spawn: std.ArrayListUnmanaged(EntityObserver) = .empty,
+    entity_destroy: std.ArrayListUnmanaged(EntityObserver) = .empty,
+    component_add: std.ArrayListUnmanaged(ComponentObserver) = .empty,
+    component_remove: std.ArrayListUnmanaged(ComponentObserver) = .empty,
+    component_change: std.ArrayListUnmanaged(ComponentObserver) = .empty,
+
+    pub fn deinit(self: *Observers, alloc: std.mem.Allocator) void {
+        self.entity_spawn.deinit(alloc);
+        self.entity_destroy.deinit(alloc);
+        self.component_add.deinit(alloc);
+        self.component_remove.deinit(alloc);
+        self.component_change.deinit(alloc);
+    }
+
+    pub fn onEntitySpawn(self: *Observers, alloc: std.mem.Allocator, cb: EntityFn) !void {
+        try self.entity_spawn.append(alloc, .{ .zig = cb });
+    }
+
+    pub fn onEntityDestroy(self: *Observers, alloc: std.mem.Allocator, cb: EntityFn) !void {
+        try self.entity_destroy.append(alloc, .{ .zig = cb });
+    }
+
+    pub fn onComponentAdd(self: *Observers, alloc: std.mem.Allocator, comptime T: type, cb: ComponentFn) !void {
+        try self.onComponentAddId(alloc, typeToId(T), cb);
+    }
+
+    pub fn onComponentRemove(self: *Observers, alloc: std.mem.Allocator, comptime T: type, cb: ComponentFn) !void {
+        try self.onComponentRemoveId(alloc, typeToId(T), cb);
+    }
+
+    pub fn onComponentChange(self: *Observers, alloc: std.mem.Allocator, comptime T: type, cb: ComponentFn) !void {
+        try self.onComponentChangeId(alloc, typeToId(T), cb);
+    }
+
+    pub fn onComponentAddId(self: *Observers, alloc: std.mem.Allocator, type_id: u32, cb: ComponentFn) !void {
+        try self.component_add.append(alloc, .{ .type_id = type_id, .observer = .{ .zig = cb } });
+    }
+
+    pub fn onComponentRemoveId(self: *Observers, alloc: std.mem.Allocator, type_id: u32, cb: ComponentFn) !void {
+        try self.component_remove.append(alloc, .{ .type_id = type_id, .observer = .{ .zig = cb } });
+    }
+
+    pub fn onComponentChangeId(self: *Observers, alloc: std.mem.Allocator, type_id: u32, cb: ComponentFn) !void {
+        try self.component_change.append(alloc, .{ .type_id = type_id, .observer = .{ .zig = cb } });
+    }
+
+    pub fn cOnEntitySpawn(self: *Observers, alloc: std.mem.Allocator, cb: CEntityFn, user_data: ?*anyopaque) !void {
+        try self.entity_spawn.append(alloc, .{ .c = .{ .cb = cb, .user_data = user_data } });
+    }
+
+    pub fn cOnEntityDestroy(self: *Observers, alloc: std.mem.Allocator, cb: CEntityFn, user_data: ?*anyopaque) !void {
+        try self.entity_destroy.append(alloc, .{ .c = .{ .cb = cb, .user_data = user_data } });
+    }
+
+    pub fn cOnComponentAdd(self: *Observers, alloc: std.mem.Allocator, type_id: u32, cb: CComponentFn, user_data: ?*anyopaque) !void {
+        try self.component_add.append(alloc, .{ .type_id = type_id, .observer = .{ .c = .{ .cb = cb, .user_data = user_data } } });
+    }
+
+    pub fn cOnComponentRemove(self: *Observers, alloc: std.mem.Allocator, type_id: u32, cb: CComponentFn, user_data: ?*anyopaque) !void {
+        try self.component_remove.append(alloc, .{ .type_id = type_id, .observer = .{ .c = .{ .cb = cb, .user_data = user_data } } });
+    }
+
+    pub fn cOnComponentChange(self: *Observers, alloc: std.mem.Allocator, type_id: u32, cb: CComponentFn, user_data: ?*anyopaque) !void {
+        try self.component_change.append(alloc, .{ .type_id = type_id, .observer = .{ .c = .{ .cb = cb, .user_data = user_data } } });
+    }
+
+    fn dispatchEntitySpawn(self: *Observers, world: *World, entity: *Entity) void {
+        const handle = entity.ref().toGlobalId();
+        for (self.entity_spawn.items) |obs| switch (obs) {
+            .zig => |f| f(world, entity),
+            .c => |c| c.cb(@intFromPtr(world), handle, c.user_data),
+        };
+    }
+
+    fn dispatchEntityDestroy(self: *Observers, world: *World, entity: *Entity) void {
+        const handle = entity.ref().toGlobalId();
+        for (self.entity_destroy.items) |obs| switch (obs) {
+            .zig => |f| f(world, entity),
+            .c => |c| c.cb(@intFromPtr(world), handle, c.user_data),
+        };
+    }
+
+    fn dispatchComponent(
+        list: []const ComponentObserver,
+        world: *World,
+        entity: *Entity,
+        component: *Component,
+        type_id: u32,
+    ) void {
+        const handle = entity.ref().toGlobalId();
+        for (list) |obs| {
+            if (obs.type_id != observe_all and obs.type_id != type_id) continue;
+            switch (obs.observer) {
+                .zig => |f| f(world, entity, component, type_id),
+                .c => |c| c.cb(@intFromPtr(world), handle, @intFromPtr(component), type_id, c.user_data),
+            }
+        }
+    }
+
+    fn notifyEntitySpawn(self: *Observers, world: *World, entity: *Entity) void {
+        self.dispatchEntitySpawn(world, entity);
+    }
+
+    fn notifyEntityDestroy(self: *Observers, world: *World, entity: *Entity) void {
+        self.dispatchEntityDestroy(world, entity);
+    }
+
+    fn notifyComponentAdd(self: *Observers, world: *World, entity: *Entity, component: *Component, type_id: u32) void {
+        dispatchComponent(self.component_add.items, world, entity, component, type_id);
+    }
+
+    fn notifyComponentRemove(self: *Observers, world: *World, entity: *Entity, component: *Component, type_id: u32) void {
+        dispatchComponent(self.component_remove.items, world, entity, component, type_id);
+    }
+
+    fn notifyComponentChange(self: *Observers, world: *World, entity: *Entity, component: *Component, type_id: u32) void {
+        dispatchComponent(self.component_change.items, world, entity, component, type_id);
+    }
+};
+
 pub const World = struct {
     //Superset of Entities and Systems
     entities: SuperEntities,
     components: SuperComponents,
     resources: Resources = .{},
+    events: Events,
+    observers: Observers = .{},
     _entities: []Entities,
     _components: []_Components,
     entities_len: usize = 0,
@@ -632,6 +878,8 @@ pub const World = struct {
         world.entities.world = world;
         world.components.world = world;
         world.resources = .{};
+        world.events = Events.init(allocator);
+        world.observers = .{};
 
         world.entities_len = 1;
         world.components_len = 1;
@@ -695,6 +943,77 @@ pub const World = struct {
         self.resources.remove(self.allocator, T);
     }
 
+    pub fn emitEvent(self: *World, comptime T: type, value: T) !void {
+        try self.events.emit(self.allocator, T, value);
+    }
+
+    pub fn onComponentAdd(self: *World, comptime T: type, cb: Observers.ComponentFn) !void {
+        try self.observers.onComponentAdd(self.allocator, T, cb);
+    }
+
+    pub fn onComponentRemove(self: *World, comptime T: type, cb: Observers.ComponentFn) !void {
+        try self.observers.onComponentRemove(self.allocator, T, cb);
+    }
+
+    pub fn onComponentChange(self: *World, comptime T: type, cb: Observers.ComponentFn) !void {
+        try self.observers.onComponentChange(self.allocator, T, cb);
+    }
+
+    pub fn onEntitySpawn(self: *World, cb: Observers.EntityFn) !void {
+        try self.observers.onEntitySpawn(self.allocator, cb);
+    }
+
+    pub fn onEntityDestroy(self: *World, cb: Observers.EntityFn) !void {
+        try self.observers.onEntityDestroy(self.allocator, cb);
+    }
+
+    //Queues a structural event and invokes matching observers. Called from
+    //entity/component lifecycle code whenever a change is committed.
+    fn signalEntitySpawned(self: *World, entity: *Entity) void {
+        const er = entity.ref();
+        self.events.push(self.allocator, .{ .kind = .entity_spawned, .entity = er }) catch {};
+        self.observers.notifyEntitySpawn(self, entity);
+    }
+
+    fn signalEntityDestroyed(self: *World, entity: *Entity) void {
+        const er = entity.ref();
+        self.events.push(self.allocator, .{ .kind = .entity_destroyed, .entity = er }) catch {};
+        self.observers.notifyEntityDestroy(self, entity);
+    }
+
+    fn signalComponentAdded(self: *World, entity: *Entity, component: *Component, type_id: u32) void {
+        const er = entity.ref();
+        self.events.push(self.allocator, .{
+            .kind = .component_added,
+            .entity = er,
+            .component = component,
+            .type_id = type_id,
+        }) catch {};
+        self.observers.notifyComponentAdd(self, entity, component, type_id);
+    }
+
+    fn signalComponentRemoved(self: *World, entity: *Entity, component: *Component, type_id: u32) void {
+        const er = entity.ref();
+        self.events.push(self.allocator, .{
+            .kind = .component_removed,
+            .entity = er,
+            .component = component,
+            .type_id = type_id,
+        }) catch {};
+        self.observers.notifyComponentRemove(self, entity, component, type_id);
+    }
+
+    fn signalComponentChanged(self: *World, entity: *Entity, component: *Component, type_id: u32) void {
+        const er = entity.ref();
+        self.events.push(self.allocator, .{
+            .kind = .component_changed,
+            .entity = er,
+            .component = component,
+            .type_id = type_id,
+        }) catch {};
+        self.observers.notifyComponentChange(self, entity, component, type_id);
+    }
+
     pub fn destroy(self: *World) void {
         var it = self.components.iterator();
         while (it.next()) |component|
@@ -702,6 +1021,8 @@ pub const World = struct {
 
         self.components.gc();
         self.resources.deinit(self.allocator);
+        self.events.deinit(self.allocator);
+        self.observers.deinit(self.allocator);
         var i: usize = 0;
         while (i < self.components_len) : (i += 1)
             self.allocator.free(self._components[i].sparse);
@@ -935,6 +1256,13 @@ pub const Component = struct {
         inline for (@typeInfo(@TypeOf(members)).@"struct".field_names) |name| {
             @field(field_ptr, name) = @field(members, name);
         }
+        const world = @as(*World, @ptrCast(@alignCast(component.world)));
+        const tid = typeToId(comp_type);
+        if (component.owners.len > 0) {
+            if (resolveGlobalId(world, component.owners.first)) |entity| {
+                world.signalComponentChanged(entity, component, tid);
+            }
+        }
     }
 
     //Removes this component from every owning entity's reverse index and then
@@ -1098,6 +1426,7 @@ pub const Entity = struct {
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
         try component.owners.add(world.allocator, entityGlobalId(self));
         try self.owned.add(world.allocator, component);
+        if (component.typeId) |tid| world.signalComponentAdded(self, component, tid);
     }
 
     pub fn attach_c(self: *Entity, component: *Component, comp_type: *c_type) !void {
@@ -1130,6 +1459,7 @@ pub const Entity = struct {
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
         try component.owners.add(world.allocator, entityGlobalId(self));
         try self.owned.add(world.allocator, component);
+        if (component.typeId) |tid| world.signalComponentAdded(self, component, tid);
     }
 
     pub inline fn detach(self: *Entity, component: *Component) !void {
@@ -1139,6 +1469,7 @@ pub const Entity = struct {
         component.owners.remove(entityGlobalId(self));
         self.owned.remove(component);
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, false);
+        if (component.typeId) |tid| world.signalComponentRemoved(self, component, tid);
     }
 
     pub inline fn destroy(self: *Entity) void {
@@ -1154,6 +1485,7 @@ pub const Entity = struct {
         var k: u32 = 0;
         while (k < self.owned.len) : (k += 1) {
             const component = self.owned.at(k);
+            if (component.typeId) |tid| world.signalComponentRemoved(self, component, tid);
             component.owners.remove(gid);
             if (component.typeId) |tid|
                 world._entities[self.chunk].component_mask[@as(usize, @intCast(tid))].setValue(component.id, false);
@@ -1162,6 +1494,7 @@ pub const Entity = struct {
         }
         self.owned.clear(world.allocator);
 
+        world.signalEntityDestroyed(self);
         self.alive = false;
         //Invalidate any outstanding handles to this slot. Wrapping so a slot
         //recycled billions of times never panics; collisions are astronomically
@@ -1493,6 +1826,9 @@ const Entities = struct {
         ctx.alive += 1;
         ctx.free_idx += 1;
 
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        world.signalEntitySpawned(entity);
+
         return entity;
     }
 
@@ -1696,6 +2032,10 @@ pub const SystemContext = struct {
     //if none has been inserted yet.
     pub inline fn resource(self: *SystemContext, comptime T: type) ?*T {
         return self.world.resources.get(T);
+    }
+
+    pub inline fn events(self: *SystemContext) *Events {
+        return &self.world.events;
     }
 };
 
@@ -2144,4 +2484,47 @@ test "systems access resources through SystemContext" {
     try sched.run();
 
     try std.testing.expectEqual(@as(u32, 11), S.tick_after);
+}
+
+test "observers fire synchronously on component attach" {
+    const A = struct { v: u32 = 0 };
+    const O = struct {
+        var count: u32 = 0;
+        fn onAdd(world: *World, entity: *Entity, component: *Component, type_id: u32) void {
+            _ = world;
+            _ = entity;
+            _ = component;
+            _ = type_id;
+            count += 1;
+        }
+    };
+    O.count = 0;
+
+    var world = try World.create();
+    defer world.destroy();
+
+    try world.onComponentAdd(A, O.onAdd);
+    const e = try world.entities.create();
+    _ = try e.addComponent(A{ .v = 1 });
+    try std.testing.expectEqual(@as(u32, 1), O.count);
+}
+
+test "structural events queue lifecycle changes" {
+    const C = struct {
+        var spawns: u32 = 0;
+        fn onEvent(ev: StructuralEvent) void {
+            if (ev.kind == .entity_spawned) spawns += 1;
+        }
+    };
+    C.spawns = 0;
+
+    var world = try World.create();
+    defer world.destroy();
+
+    _ = try world.entities.create();
+    try std.testing.expect(world.events.count() >= 1);
+
+    world.events.drainStructural(C.onEvent);
+    try std.testing.expectEqual(@as(u32, 1), C.spawns);
+    try std.testing.expect(world.events.queue.items.len == 0);
 }

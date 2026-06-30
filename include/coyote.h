@@ -97,6 +97,33 @@ void* coyote_resource_get(world world, coyote_type type);
 int coyote_resource_has(world world, coyote_type type);
 void coyote_resource_remove(world world, coyote_type type);
 
+// Events: queued lifecycle notifications and typed custom payloads.
+typedef enum coyote_event_kind {
+    COYOTE_EVENT_ENTITY_SPAWNED = 0,
+    COYOTE_EVENT_ENTITY_DESTROYED = 1,
+    COYOTE_EVENT_COMPONENT_ADDED = 2,
+    COYOTE_EVENT_COMPONENT_REMOVED = 3,
+    COYOTE_EVENT_COMPONENT_CHANGED = 4,
+} coyote_event_kind;
+
+typedef void (*coyote_structural_handler)(world world, coyote_event_kind kind, coyote_entity_ref entity, component component, uint32_t type_id, void* user_data);
+
+int coyote_events_count(world world);
+int coyote_events_emit(world world, coyote_type type, const void* data);
+void coyote_events_drain_structural(world world, coyote_structural_handler handler, void* user_data);
+void coyote_events_clear(world world);
+
+// Observers: synchronous lifecycle callbacks (run when changes commit).
+typedef void (*coyote_observer_entity)(world world, coyote_entity_ref entity, void* user_data);
+typedef void (*coyote_observer_component)(world world, coyote_entity_ref entity, component component, uint32_t type_id, void* user_data);
+
+int coyote_observer_on_entity_spawn(world world, coyote_observer_entity observer, void* user_data);
+int coyote_observer_on_entity_destroy(world world, coyote_observer_entity observer, void* user_data);
+int coyote_observer_on_component_add(world world, coyote_type type, coyote_observer_component observer, void* user_data);
+int coyote_observer_on_component_add_any(world world, coyote_observer_component observer, void* user_data);
+int coyote_observer_on_component_remove(world world, coyote_type type, coyote_observer_component observer, void* user_data);
+int coyote_observer_on_component_change(world world, coyote_type type, coyote_observer_component observer, void* user_data);
+
 #ifdef __cplusplus
 }
 #endif

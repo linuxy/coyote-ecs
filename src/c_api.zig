@@ -469,3 +469,110 @@ export fn coyote_resource_remove(world_ptr: usize, c_type: coyote.c_type) void {
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
     world.resources.cRemove(world.allocator, c_type);
 }
+
+// --- Events and observers ---
+
+export fn coyote_events_count(world_ptr: usize) c_int {
+    if (world_ptr == 0) return 0;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    return @intCast(world.events.count());
+}
+
+export fn coyote_events_emit(world_ptr: usize, c_type: coyote.c_type, data: *const anyopaque) c_int {
+    if (world_ptr == 0 or @intFromPtr(data) == 0) return 1;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    world.events.cEmit(world.allocator, c_type, data) catch return 1;
+    return 0;
+}
+
+export fn coyote_events_clear(world_ptr: usize) void {
+    if (world_ptr == 0) return;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    world.events.clearAll();
+}
+
+export fn coyote_events_drain_structural(
+    world_ptr: usize,
+    handler: *const fn (usize, coyote.EventKind, u64, usize, u32, ?*anyopaque) callconv(.c) void,
+    user_data: ?*anyopaque,
+) void {
+    if (world_ptr == 0) return;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    const items = world.events.queue.items;
+    var i: usize = 0;
+    while (i < items.len) : (i += 1) {
+        const ev = items[i];
+        const comp_ptr: usize = if (ev.component) |c| @intFromPtr(c) else 0;
+        handler(@intFromPtr(world), ev.kind, ev.entity.toGlobalId(), comp_ptr, ev.type_id, user_data);
+    }
+    world.events.queue.clearRetainingCapacity();
+}
+
+export fn coyote_observer_on_entity_spawn(
+    world_ptr: usize,
+    cb: coyote.Observers.CEntityFn,
+    user_data: ?*anyopaque,
+) c_int {
+    if (world_ptr == 0) return 1;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    world.observers.cOnEntitySpawn(world.allocator, cb, user_data) catch return 1;
+    return 0;
+}
+
+export fn coyote_observer_on_entity_destroy(
+    world_ptr: usize,
+    cb: coyote.Observers.CEntityFn,
+    user_data: ?*anyopaque,
+) c_int {
+    if (world_ptr == 0) return 1;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    world.observers.cOnEntityDestroy(world.allocator, cb, user_data) catch return 1;
+    return 0;
+}
+
+export fn coyote_observer_on_component_add(
+    world_ptr: usize,
+    c_type: coyote.c_type,
+    cb: coyote.Observers.CComponentFn,
+    user_data: ?*anyopaque,
+) c_int {
+    if (world_ptr == 0) return 1;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    world.observers.cOnComponentAdd(world.allocator, coyote.typeToIdC(c_type), cb, user_data) catch return 1;
+    return 0;
+}
+
+export fn coyote_observer_on_component_add_any(
+    world_ptr: usize,
+    cb: coyote.Observers.CComponentFn,
+    user_data: ?*anyopaque,
+) c_int {
+    if (world_ptr == 0) return 1;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    world.observers.cOnComponentAdd(world.allocator, coyote.observe_all, cb, user_data) catch return 1;
+    return 0;
+}
+
+export fn coyote_observer_on_component_remove(
+    world_ptr: usize,
+    c_type: coyote.c_type,
+    cb: coyote.Observers.CComponentFn,
+    user_data: ?*anyopaque,
+) c_int {
+    if (world_ptr == 0) return 1;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    world.observers.cOnComponentRemove(world.allocator, coyote.typeToIdC(c_type), cb, user_data) catch return 1;
+    return 0;
+}
+
+export fn coyote_observer_on_component_change(
+    world_ptr: usize,
+    c_type: coyote.c_type,
+    cb: coyote.Observers.CComponentFn,
+    user_data: ?*anyopaque,
+) c_int {
+    if (world_ptr == 0) return 1;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    world.observers.cOnComponentChange(world.allocator, coyote.typeToIdC(c_type), cb, user_data) catch return 1;
+    return 0;
+}

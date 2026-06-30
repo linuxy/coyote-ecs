@@ -48,6 +48,29 @@ static void sys_count(world w, command_buffer cb, void* user_data) {
         printf("Scheduler tick resource: %u\n", time->tick);
 }
 
+static int g_component_adds = 0;
+
+static void obs_component_add(world w, coyote_entity_ref entity, component c, uint32_t type_id, void* user_data) {
+    (void)w;
+    (void)entity;
+    (void)c;
+    (void)type_id;
+    (void)user_data;
+    g_component_adds += 1;
+}
+
+static int g_spawn_events = 0;
+
+static void drain_spawn_events(world w, coyote_event_kind kind, coyote_entity_ref entity, component c, uint32_t type_id, void* user_data) {
+    (void)w;
+    (void)entity;
+    (void)c;
+    (void)type_id;
+    (void)user_data;
+    if(kind == COYOTE_EVENT_ENTITY_SPAWNED)
+        g_spawn_events += 1;
+}
+
 int main(void) {
     world world = coyote_world_create();
 
@@ -131,11 +154,18 @@ int main(void) {
     // Scheduler: stage 0 spawns (deferred), stage 1 observes after the flush.
     game_time gt = { .tick = 0 };
     coyote_resource_insert(world, t_time, &gt);
+    coyote_observer_on_component_add_any(world, obs_component_add, NULL);
+    g_component_adds = 0;
+    g_spawn_events = 0;
+    coyote_events_clear(world);
     scheduler sched = coyote_scheduler_create(world);
     int observed = -1;
     coyote_scheduler_add_system(sched, 0, sys_spawn, NULL);
     coyote_scheduler_add_system(sched, 1, sys_count, &observed);
     coyote_scheduler_run(sched);
+    coyote_events_drain_structural(world, drain_spawn_events, NULL);
+    printf("Observer component adds: %d\n", g_component_adds);
+    printf("Drained spawn events: %d\n", g_spawn_events);
     printf("Entities observed by scheduler stage 1: %d\n", observed);
     coyote_scheduler_destroy(sched);
 

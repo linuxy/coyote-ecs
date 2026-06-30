@@ -31,6 +31,39 @@ export fn coyote_entity_destroy(entity_ptr: usize) void {
     const entity = @as(*coyote.Entity, @ptrFromInt(entity_ptr));
     entity.destroy();
 }
+
+//Returns a stable, generation-tagged handle for an entity. Store this instead
+//of the raw pointer if the entity may be destroyed and its slot recycled.
+export fn coyote_entity_handle(entity_ptr: usize) u64 {
+    if (entity_ptr == 0) return 0;
+    const entity = @as(*coyote.Entity, @ptrFromInt(entity_ptr));
+    return coyote.entityGlobalId(entity);
+}
+
+//The entity's current generation. Bumped each time the slot is destroyed.
+export fn coyote_entity_generation(entity_ptr: usize) u32 {
+    if (entity_ptr == 0) return 0;
+    const entity = @as(*coyote.Entity, @ptrFromInt(entity_ptr));
+    return entity.generation;
+}
+
+//Resolves a handle back to a live entity pointer, or 0 if it is stale
+//(the entity was destroyed, or its slot now holds a newer entity).
+export fn coyote_entity_resolve(world_ptr: usize, handle: u64) usize {
+    if (world_ptr == 0) return 0;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    if (coyote.resolveGlobalId(world, handle)) |entity| {
+        return @intFromPtr(entity);
+    }
+    return 0;
+}
+
+//1 if `handle` still refers to the same live entity, 0 otherwise.
+export fn coyote_entity_is_valid(world_ptr: usize, handle: u64) c_int {
+    if (world_ptr == 0) return 0;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    return if (coyote.resolveGlobalId(world, handle) != null) 1 else 0;
+}
 //static const coy_type transform_type = { .coy_id = 0, .coy_sizeof = sizeof(transform) , .name = "transform"};
 //static const coy_type velocity_type = COYOTE_MAKE_TYPE(1, velocity);
 export fn coyote_component_create(world_ptr: usize, c_type: coyote.c_type) usize {

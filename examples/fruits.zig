@@ -119,6 +119,17 @@ pub fn main() !void {
 
     std.log.info("Entities: {}", .{world.entities.count()});
     std.log.info("Components: {}", .{world.components.count()});
+
+    //Generational handles: a stored handle is invalidated when the entity is
+    //destroyed and its slot recycled, instead of silently aliasing a new entity.
+    const subject = try world.entities.create();
+    const handle = subject.ref();
+    std.log.info("Handle valid before destroy: {}", .{world.entities.isValid(handle)});
+    subject.destroy();
+    std.log.info("Handle valid after destroy: {}", .{world.entities.isValid(handle)});
+    const recycled = try world.entities.create(); // reuses the freed slot
+    std.log.info("Old handle resolves to recycled slot: {}", .{world.entities.resolve(handle) != null});
+    recycled.destroy();
 }
 
 pub fn Grow(world: *World) void {

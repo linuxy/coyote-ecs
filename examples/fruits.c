@@ -79,8 +79,17 @@ int main(void) {
     coyote_entity_remove(e_apple, t_apple);
     printf("Apple entity has apple component after remove: %d\n", coyote_entity_has(e_apple, t_apple));
 
+    // Generational handles: a stored handle survives slot recycling safely.
+    coyote_entity_ref h = coyote_entity_handle(e_pear);
+    printf("Handle valid before destroy: %d\n", coyote_entity_is_valid(world, h));
+
     coyote_entity_destroy(e_apple);
     coyote_entity_destroy(e_pear);
+
+    printf("Handle valid after destroy: %d\n", coyote_entity_is_valid(world, h));
+    entity recycled = coyote_entity_create(world); // reuses a freed slot
+    printf("Old handle resolves after recycle: %d\n", coyote_entity_resolve(world, h) != 0);
+    coyote_entity_destroy(recycled);
 
     printf("Number of entities: %d == 1\n", coyote_entities_count(world));
     printf("Number of components: %d == 2\n", coyote_components_count(world));

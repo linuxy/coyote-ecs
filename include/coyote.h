@@ -24,11 +24,16 @@ typedef uintptr_t entity;
 typedef uintptr_t component;
 typedef uintptr_t world;
 typedef uintptr_t iterator;
+typedef uint64_t coyote_entity_ref; // stable, generation-tagged entity handle
 
 uintptr_t coyote_world_create();
 void coyote_world_destroy(world world);
 entity coyote_entity_create(world world);
 void coyote_entity_destroy(entity entity);
+coyote_entity_ref coyote_entity_handle(entity entity);
+uint32_t coyote_entity_generation(entity entity);
+entity coyote_entity_resolve(world world, coyote_entity_ref handle);
+int coyote_entity_is_valid(world world, coyote_entity_ref handle);
 component coyote_component_create(world world, coyote_type type);
 int coyote_entity_attach(entity entity, component component, coyote_type type);
 int coyote_entity_detach(entity entity, component component);

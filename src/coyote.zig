@@ -533,6 +533,12 @@ pub const World = struct {
     pub fn create() !*World {
         var world = allocator.create(World) catch unreachable;
 
+        //These module-level cursors track the active chunk during create/expand.
+        //Reset them here so a new world starts at chunk 0 instead of inheriting
+        //a stale index from a previously-created (e.g. multi-chunk) world.
+        entities_idx = 0;
+        components_idx = 0;
+
         world.allocator = allocator;
         world.entities.world = world;
         world.components.world = world;
@@ -550,6 +556,10 @@ pub const World = struct {
         world._entities[entities_idx].alive = 0;
         world._entities[entities_idx].free_idx = 0;
         world._entities[entities_idx].sparse = try allocator.alloc(Entity, CHUNK_SIZE);
+        for (world._entities[entities_idx].sparse) |*e| {
+            e.alive = false;
+            e.generation = 0;
+        }
 
         world.systems = Systems{};
 
@@ -594,9 +604,52 @@ pub const World = struct {
 //Globally unique entity identity = chunk * CHUNK_SIZE + per-chunk id.
 //Used as the key for component ownership so it is unambiguous across the
 //multiple entity chunks a world may grow into.
+//
+//Layout: the low 32 bits hold the slot location (chunk * CHUNK_SIZE + id) and
+//the high 32 bits hold the entity generation. Folding the generation into the
+//ownership key makes OwnerSet/queries reject stale owners for free: once an
+//entity is destroyed its generation is bumped, so a recycled slot produces a
+//different key and old ownership entries no longer match.
 pub inline fn entityGlobalId(entity: *const Entity) u64 {
-    return @as(u64, @intCast(entity.chunk)) * CHUNK_SIZE + @as(u64, entity.id);
+    const location: u64 = @as(u64, @intCast(entity.chunk)) * CHUNK_SIZE + @as(u64, entity.id);
+    return (@as(u64, entity.generation) << 32) | location;
 }
+
+inline fn gidLocation(gid: u64) u64 {
+    return gid & 0xFFFF_FFFF;
+}
+
+inline fn gidGeneration(gid: u64) u32 {
+    return @intCast(gid >> 32);
+}
+
+//Resolves a generation-tagged global id back to a live entity, or null if the
+//slot is empty or has since been recycled (generation mismatch). This is the
+//single decode point shared by handles, the C API, and the entity filter.
+pub inline fn resolveGlobalId(world: *World, gid: u64) ?*Entity {
+    const loc = gidLocation(gid);
+    const e_chunk: usize = @intCast(loc / CHUNK_SIZE);
+    const e_id: usize = @intCast(loc % CHUNK_SIZE);
+    if (e_chunk >= world.entities_len or e_id >= CHUNK_SIZE) return null;
+    const entity = &world._entities[e_chunk].sparse[e_id];
+    if (entity.alive and entity.generation == gidGeneration(gid)) return entity;
+    return null;
+}
+
+//A stable, copyable handle to an entity. Unlike a `*Entity`, it survives slot
+//recycling: resolving a handle whose generation no longer matches the live
+//occupant returns null instead of silently aliasing a different entity.
+//`extern` so it can cross the C ABI directly if needed.
+pub const EntityRef = extern struct {
+    chunk: u32,
+    id: u32,
+    generation: u32,
+
+    pub inline fn toGlobalId(self: EntityRef) u64 {
+        const location: u64 = @as(u64, self.chunk) * CHUNK_SIZE + @as(u64, self.id);
+        return (@as(u64, self.generation) << 32) | location;
+    }
+};
 
 //Tracks which entities own a component, keyed by global entity id.
 //Optimized for the common single-owner case: the first owner is stored inline
@@ -730,9 +783,16 @@ pub const Component = struct {
 pub const Entity = struct {
     chunk: usize,
     id: u32,
+    generation: u32 = 0,
     alive: bool,
     world: ?*anyopaque,
     allocated: bool = false,
+
+    //Returns a stable handle that can be stored and later validated with
+    //`world.entities.resolve`/`isValid`, even after this slot is recycled.
+    pub inline fn ref(self: *const Entity) EntityRef {
+        return .{ .chunk = @intCast(self.chunk), .id = self.id, .generation = self.generation };
+    }
 
     pub inline fn addComponent(ctx: *Entity, comp_val: anytype) !*Component {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
@@ -803,8 +863,6 @@ pub const Entity = struct {
         const world = @as(*World, @ptrCast(@alignCast(component.world)));
 
         if (@sizeOf(@TypeOf(comp_type)) > 0) {
-            var ref = @TypeOf(comp_type){};
-            ref = comp_type;
             if (!component.allocated) {
                 const data = try world.allocator.create(@TypeOf(comp_type));
                 data.* = comp_type;
@@ -836,8 +894,6 @@ pub const Entity = struct {
         const world = @as(*World, @ptrCast(@alignCast(component.world)));
 
         if (@sizeOf(@TypeOf(comp_type)) > 0) {
-            var ref = @TypeOf(comp_type){};
-            ref = comp_type;
             if (!component.allocated) {
                 const data = try world.allocator.create(@TypeOf(comp_type));
                 data.* = comp_type;
@@ -877,6 +933,10 @@ pub const Entity = struct {
         var world = @as(*World, @ptrCast(@alignCast(self.world)));
 
         self.alive = false;
+        //Invalidate any outstanding handles to this slot. Wrapping so a slot
+        //recycled billions of times never panics; collisions are astronomically
+        //unlikely and no worse than the pre-generational behavior.
+        self.generation +%= 1;
         world._entities[self.chunk].alive -= 1;
         world._entities[self.chunk].free_idx = self.id;
         world.entities_free_idx = self.chunk;
@@ -984,6 +1044,10 @@ pub const SuperEntities = struct {
         world._entities[world.entities_len].created = 0;
         world._entities[world.entities_len].free_idx = 0;
         world._entities[world.entities_len].sparse = try world.allocator.alloc(Entity, CHUNK_SIZE);
+        for (world._entities[world.entities_len].sparse) |*e| {
+            e.alive = false;
+            e.generation = 0;
+        }
 
         var i: usize = 0;
         while (i < MAX_COMPONENTS) : (i += 1) {
@@ -1041,9 +1105,10 @@ pub const SuperEntities = struct {
                     const k = it.owner_idx;
                     it.owner_idx += 1;
                     const gid = if (k == 0) component.owners.first else component.owners.rest.items[k - 1];
-                    const e_chunk: usize = @intCast(gid / CHUNK_SIZE);
-                    const e_id: usize = @intCast(gid % CHUNK_SIZE);
-                    return &it.ctx.*[e_chunk].sparse[e_id];
+                    //Skip owners whose entity was destroyed/recycled (generation
+                    //mismatch) so a stale ownership entry never yields a wrong entity.
+                    if (resolveGlobalId(it.world, gid)) |entity| return entity;
+                    continue;
                 }
 
                 it.index += 1;
@@ -1058,6 +1123,18 @@ pub const SuperEntities = struct {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const entities = &world._entities;
         return .{ .ctx = entities, .alive = ctx.alive };
+    }
+
+    //Resolves a stored handle to the live entity it refers to, or null if that
+    //entity has been destroyed (or its slot recycled by a newer entity).
+    pub inline fn resolve(ctx: *SuperEntities, handle: EntityRef) ?*Entity {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return resolveGlobalId(world, handle.toGlobalId());
+    }
+
+    //True if `handle` still refers to the same live entity it was taken from.
+    pub inline fn isValid(ctx: *SuperEntities, handle: EntityRef) bool {
+        return ctx.resolve(handle) != null;
     }
 
     pub fn iteratorFilter(ctx: *SuperEntities, comptime comp_type: type) SuperEntities.MaskedIterator {
@@ -1256,4 +1333,55 @@ test "ownership is exact across multiple entity chunks" {
     try e0.remove(A);
     try std.testing.expect(!e0.has(A));
     try std.testing.expect(e1.has(B));
+}
+
+test "generational handles detect recycled entity slots" {
+    var world = try World.create();
+    defer world.destroy();
+
+    const e = try world.entities.create();
+    const handle = e.ref();
+    try std.testing.expect(world.entities.isValid(handle));
+    try std.testing.expectEqual(e, world.entities.resolve(handle).?);
+
+    // Destroying the entity invalidates the handle immediately.
+    e.destroy();
+    try std.testing.expect(!world.entities.isValid(handle));
+    try std.testing.expect(world.entities.resolve(handle) == null);
+
+    // Recycling the slot yields a fresh entity with a bumped generation; the
+    // old handle must NOT resolve to it (no silent aliasing).
+    const e2 = try world.entities.create();
+    try std.testing.expectEqual(e.id, e2.id); // same slot reused
+    try std.testing.expectEqual(e.chunk, e2.chunk);
+    try std.testing.expect(e2.generation != handle.generation);
+    try std.testing.expect(!world.entities.isValid(handle));
+
+    // The new entity's own handle is valid and distinct.
+    const handle2 = e2.ref();
+    try std.testing.expect(world.entities.isValid(handle2));
+    try std.testing.expectEqual(e2, world.entities.resolve(handle2).?);
+}
+
+test "queries never yield an entity through a recycled-slot owner" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    // e1 owns an A. Destroy it WITHOUT detaching, leaving a stale owner entry
+    // on the component, then recycle the slot with a new entity.
+    const e1 = try world.entities.create();
+    _ = try e1.addComponent(A{ .v = 1 });
+    e1.destroy();
+
+    const e2 = try world.entities.create(); // reuses e1's slot, new generation
+    try std.testing.expectEqual(e1.id, e2.id);
+    try std.testing.expect(!e2.has(A)); // recycled entity does not inherit ownership
+
+    // The A-filter must not surface the recycled slot via the stale owner.
+    var count: usize = 0;
+    var it = world.entities.iteratorFilter(A);
+    while (it.next()) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 0), count);
 }

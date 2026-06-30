@@ -581,6 +581,12 @@ pub const World = struct {
         return world;
     }
 
+    //Returns a fresh command buffer bound to this world. Caller owns it and
+    //must call `deinit()` when done (after a final `flush`/`reset`).
+    pub fn commandBuffer(self: *World) CommandBuffer {
+        return CommandBuffer.init(self);
+    }
+
     pub fn destroy(self: *World) void {
         var it = self.components.iterator();
         while (it.next()) |component|
@@ -659,6 +665,16 @@ pub const EntityRef = extern struct {
         return (@as(u64, self.generation) << 32) | location;
     }
 };
+
+//Rebuilds an EntityRef from the packed u64 handle the C API hands out.
+pub inline fn entityRefFromGlobalId(gid: u64) EntityRef {
+    const loc = gidLocation(gid);
+    return .{
+        .chunk = @intCast(loc / CHUNK_SIZE),
+        .id = @intCast(loc % CHUNK_SIZE),
+        .generation = gidGeneration(gid),
+    };
+}
 
 //Tracks which entities own a component, keyed by global entity id.
 //Optimized for the common single-owner case: the first owner is stored inline
@@ -1384,6 +1400,181 @@ pub const Systems = struct {
     }
 };
 
+//Records structural mutations (spawn/despawn/attach/detach) so they can be
+//applied later, instead of mutating the world in the middle of an iteration or
+//query. This is the building block a scheduler uses: each system records into a
+//buffer, and the scheduler flushes between stages.
+//
+//Commands are applied in the order they were recorded. Newly spawned entities
+//are referred to by a `Deferred` placeholder that resolves to a real entity at
+//flush time, so you can spawn an entity and attach components to it in one batch.
+//Existing entities are targeted by `EntityRef` so a despawn recorded earlier in
+//the batch never resurfaces as a stale pointer.
+pub const CommandBuffer = struct {
+    pub const Target = union(enum) {
+        existing: EntityRef,
+        deferred: u32,
+    };
+
+    //A placeholder for an entity that will exist after flush.
+    pub const Deferred = struct {
+        index: u32,
+        pub inline fn target(self: Deferred) Target {
+            return .{ .deferred = self.index };
+        }
+    };
+
+    const ApplyFn = *const fn (*World, *Entity, *anyopaque) anyerror!void;
+
+    const Cmd = union(enum) {
+        create_entity: u32, //placeholder index
+        destroy_entity: Target,
+        attach_value: struct { target: Target, data: *anyopaque, apply: ApplyFn }, //Zig, typed payload
+        attach_component: struct { target: Target, component: *Component, c_type: c_type }, //C, existing component
+        remove: struct { target: Target, type_id: u32 },
+    };
+
+    world: *World,
+    arena: std.heap.ArenaAllocator,
+    cmds: std.ArrayListUnmanaged(Cmd) = .empty,
+    created: std.ArrayListUnmanaged(?*Entity) = .empty,
+
+    pub fn init(world: *World) CommandBuffer {
+        return .{ .world = world, .arena = std.heap.ArenaAllocator.init(world.allocator) };
+    }
+
+    pub fn deinit(self: *CommandBuffer) void {
+        self.cmds.deinit(self.world.allocator);
+        self.created.deinit(self.world.allocator);
+        self.arena.deinit();
+    }
+
+    //Spawns an entity at flush time, returning a placeholder usable as a target
+    //for attach/remove commands recorded afterward in the same batch.
+    pub fn createEntity(self: *CommandBuffer) !Deferred {
+        const idx: u32 = @intCast(self.created.items.len);
+        try self.created.append(self.world.allocator, null);
+        try self.cmds.append(self.world.allocator, .{ .create_entity = idx });
+        return .{ .index = idx };
+    }
+
+    pub fn destroyEntity(self: *CommandBuffer, ref: EntityRef) !void {
+        try self.cmds.append(self.world.allocator, .{ .destroy_entity = .{ .existing = ref } });
+    }
+
+    pub fn destroyDeferred(self: *CommandBuffer, d: Deferred) !void {
+        try self.cmds.append(self.world.allocator, .{ .destroy_entity = d.target() });
+    }
+
+    //Records attaching a (copied) typed component value to an existing entity.
+    pub fn attach(self: *CommandBuffer, ref: EntityRef, value: anytype) !void {
+        try self.attachTarget(.{ .existing = ref }, value);
+    }
+
+    //Records attaching a (copied) typed component value to a deferred entity.
+    pub fn attachDeferred(self: *CommandBuffer, d: Deferred, value: anytype) !void {
+        try self.attachTarget(d.target(), value);
+    }
+
+    fn attachTarget(self: *CommandBuffer, t: Target, value: anytype) !void {
+        const T = @TypeOf(value);
+        const box = try self.arena.allocator().create(T);
+        box.* = value;
+        const apply = struct {
+            fn f(w: *World, e: *Entity, data: *anyopaque) anyerror!void {
+                const v = @as(*T, @ptrCast(@alignCast(data))).*;
+                const c = try w.components.create(T);
+                try e.attach(c, v);
+            }
+        }.f;
+        try self.cmds.append(self.world.allocator, .{ .attach_value = .{ .target = t, .data = box, .apply = apply } });
+    }
+
+    pub fn remove(self: *CommandBuffer, ref: EntityRef, comptime T: type) !void {
+        try self.cmds.append(self.world.allocator, .{ .remove = .{ .target = .{ .existing = ref }, .type_id = typeToId(T) } });
+    }
+
+    pub fn removeDeferred(self: *CommandBuffer, d: Deferred, comptime T: type) !void {
+        try self.cmds.append(self.world.allocator, .{ .remove = .{ .target = d.target(), .type_id = typeToId(T) } });
+    }
+
+    fn resolveTarget(self: *CommandBuffer, t: Target) ?*Entity {
+        return switch (t) {
+            .existing => |ref| self.world.entities.resolve(ref),
+            .deferred => |idx| if (idx < self.created.items.len) self.created.items[idx] else null,
+        };
+    }
+
+    //Applies all recorded commands in order, then resets the buffer for reuse.
+    //Commands targeting an entity that no longer resolves (e.g. destroyed
+    //earlier in the same batch) are skipped.
+    pub fn flush(self: *CommandBuffer) !void {
+        for (self.cmds.items) |cmd| {
+            switch (cmd) {
+                .create_entity => |idx| self.created.items[idx] = try self.world.entities.create(),
+                .destroy_entity => |t| {
+                    if (self.resolveTarget(t)) |e| e.destroy();
+                },
+                .attach_value => |a| {
+                    if (self.resolveTarget(a.target)) |e| try a.apply(self.world, e, a.data);
+                },
+                .attach_component => |a| {
+                    if (self.resolveTarget(a.target)) |e| try e.attach(a.component, a.c_type);
+                },
+                .remove => |r| {
+                    if (self.resolveTarget(r.target)) |e| try e.removeById(r.type_id);
+                },
+            }
+        }
+        self.reset();
+    }
+
+    //Discards all recorded commands without applying them and frees payloads.
+    pub fn reset(self: *CommandBuffer) void {
+        self.cmds.clearRetainingCapacity();
+        self.created.clearRetainingCapacity();
+        _ = self.arena.reset(.retain_capacity);
+    }
+
+    // --- helpers for the C API (runtime handles / ids, existing components) ---
+
+    pub fn cSpawn(self: *CommandBuffer) u32 {
+        const idx: u32 = @intCast(self.created.items.len);
+        self.created.append(self.world.allocator, null) catch return std.math.maxInt(u32);
+        self.cmds.append(self.world.allocator, .{ .create_entity = idx }) catch return std.math.maxInt(u32);
+        return idx;
+    }
+
+    pub fn cDestroyExisting(self: *CommandBuffer, handle: u64) bool {
+        return self.push(.{ .destroy_entity = .{ .existing = entityRefFromGlobalId(handle) } });
+    }
+
+    pub fn cDestroyDeferred(self: *CommandBuffer, idx: u32) bool {
+        return self.push(.{ .destroy_entity = .{ .deferred = idx } });
+    }
+
+    pub fn cAttachExisting(self: *CommandBuffer, handle: u64, component: *Component, ct: c_type) bool {
+        return self.push(.{ .attach_component = .{ .target = .{ .existing = entityRefFromGlobalId(handle) }, .component = component, .c_type = ct } });
+    }
+
+    pub fn cAttachDeferred(self: *CommandBuffer, idx: u32, component: *Component, ct: c_type) bool {
+        return self.push(.{ .attach_component = .{ .target = .{ .deferred = idx }, .component = component, .c_type = ct } });
+    }
+
+    pub fn cRemoveExisting(self: *CommandBuffer, handle: u64, type_id: u32) bool {
+        return self.push(.{ .remove = .{ .target = .{ .existing = entityRefFromGlobalId(handle) }, .type_id = type_id } });
+    }
+
+    pub fn cRemoveDeferred(self: *CommandBuffer, idx: u32, type_id: u32) bool {
+        return self.push(.{ .remove = .{ .target = .{ .deferred = idx }, .type_id = type_id } });
+    }
+
+    fn push(self: *CommandBuffer, cmd: Cmd) bool {
+        self.cmds.append(self.world.allocator, cmd) catch return false;
+        return true;
+    }
+};
+
 pub fn opaqueDestroy(self: std.mem.Allocator, ptr: anytype, sz: usize, alignment: u8) void {
     const non_const_ptr = @as([*]u8, @ptrFromInt(@intFromPtr(ptr)));
     self.rawFree(non_const_ptr[0..sz], .fromByteUnits(alignment), @returnAddress());
@@ -1555,4 +1746,96 @@ test "entity iterator visits live entities despite destroyed-slot holes" {
     while (it.next()) |_| seen += 1;
     try std.testing.expectEqual(@as(usize, n - 3), seen);
     try std.testing.expectEqual(@as(u32, n - 3), world.entities.count());
+}
+
+test "command buffer defers spawn + attach until flush" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    var cb = world.commandBuffer();
+    defer cb.deinit();
+
+    const e = try cb.createEntity();
+    try cb.attachDeferred(e, A{ .v = 42 });
+
+    // Nothing applied yet.
+    try std.testing.expectEqual(@as(u32, 0), world.entities.count());
+    try std.testing.expectEqual(@as(u32, 0), world.components.count());
+
+    try cb.flush();
+
+    // Now the entity exists and owns the component with the recorded value.
+    try std.testing.expectEqual(@as(u32, 1), world.entities.count());
+    var q = world.entities.query(.{A});
+    var found: ?*Entity = null;
+    while (q.next()) |ent| found = ent;
+    try std.testing.expect(found != null);
+    try std.testing.expectEqual(@as(u32, 42), found.?.get(A).?.v);
+}
+
+test "command buffer defers destroy recorded during iteration" {
+    var world = try World.create();
+    defer world.destroy();
+
+    const n = 6;
+    var es: [n]*Entity = undefined;
+    for (0..n) |i| es[i] = try world.entities.create();
+
+    var cb = world.commandBuffer();
+    defer cb.deinit();
+
+    // Iterate and record destroys for even-indexed entities WITHOUT mutating
+    // the world mid-iteration.
+    var it = world.entities.iterator();
+    var idx: usize = 0;
+    while (it.next()) |e| : (idx += 1) {
+        if (idx % 2 == 0) try cb.destroyEntity(e.ref());
+    }
+    // All still alive until flush.
+    try std.testing.expectEqual(@as(u32, n), world.entities.count());
+
+    try cb.flush();
+    try std.testing.expectEqual(@as(u32, n - 3), world.entities.count());
+}
+
+test "command buffer defers component removal" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    const e = try world.entities.create();
+    _ = try e.addComponent(A{ .v = 1 });
+    try std.testing.expect(e.has(A));
+
+    var cb = world.commandBuffer();
+    defer cb.deinit();
+
+    try cb.remove(e.ref(), A);
+    try std.testing.expect(e.has(A)); // not yet
+    try cb.flush();
+    try std.testing.expect(!e.has(A));
+}
+
+test "command buffer skips commands targeting an entity destroyed earlier in the batch" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    const e = try world.entities.create();
+    const ref = e.ref();
+
+    var cb = world.commandBuffer();
+    defer cb.deinit();
+
+    // Destroy then (stale) attach in the same batch: the attach must be skipped.
+    try cb.destroyEntity(ref);
+    try cb.attach(ref, A{ .v = 9 });
+    try cb.flush();
+
+    try std.testing.expectEqual(@as(u32, 0), world.entities.count());
+    try std.testing.expectEqual(@as(u32, 0), world.components.count());
 }

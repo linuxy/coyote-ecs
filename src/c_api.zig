@@ -321,3 +321,83 @@ export fn coyote_components_iterator_filter_range_next(iterator_ptr: usize) usiz
         return 0;
     }
 }
+
+// --- Command buffer: deferred structural mutations ---
+
+const CB_BAD_INDEX: u32 = std.math.maxInt(u32);
+
+export fn coyote_command_buffer_create(world_ptr: usize) usize {
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    const cb = coyote.allocator.create(coyote.CommandBuffer) catch return 0;
+    cb.* = coyote.CommandBuffer.init(world);
+    return @intFromPtr(cb);
+}
+
+export fn coyote_command_buffer_destroy(cb_ptr: usize) void {
+    if (cb_ptr == 0) return;
+    const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
+    cb.deinit();
+    coyote.allocator.destroy(cb);
+}
+
+export fn coyote_command_buffer_flush(cb_ptr: usize) c_int {
+    if (cb_ptr == 0) return 1;
+    const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
+    cb.flush() catch return 1;
+    return 0;
+}
+
+export fn coyote_command_buffer_reset(cb_ptr: usize) void {
+    if (cb_ptr == 0) return;
+    const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
+    cb.reset();
+}
+
+//Records a deferred spawn; returns a placeholder index for use as a target.
+//Returns UINT32_MAX on allocation failure.
+export fn coyote_cb_spawn(cb_ptr: usize) u32 {
+    if (cb_ptr == 0) return CB_BAD_INDEX;
+    const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
+    return cb.cSpawn();
+}
+
+export fn coyote_cb_destroy_entity(cb_ptr: usize, handle: u64) c_int {
+    if (cb_ptr == 0) return 1;
+    const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
+    return if (cb.cDestroyExisting(handle)) 0 else 1;
+}
+
+export fn coyote_cb_destroy_entity_deferred(cb_ptr: usize, placeholder: u32) c_int {
+    if (cb_ptr == 0) return 1;
+    const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
+    return if (cb.cDestroyDeferred(placeholder)) 0 else 1;
+}
+
+//Records attaching an already-created component to an existing entity. As with
+//the eager C path, populate the component's data (via coyote_component_get)
+//after the buffer is flushed.
+export fn coyote_cb_attach(cb_ptr: usize, handle: u64, component_ptr: usize, c_type: coyote.c_type) c_int {
+    if (cb_ptr == 0 or component_ptr == 0) return 1;
+    const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
+    const component = @as(*coyote.Component, @ptrFromInt(component_ptr));
+    return if (cb.cAttachExisting(handle, component, c_type)) 0 else 1;
+}
+
+export fn coyote_cb_attach_deferred(cb_ptr: usize, placeholder: u32, component_ptr: usize, c_type: coyote.c_type) c_int {
+    if (cb_ptr == 0 or component_ptr == 0) return 1;
+    const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
+    const component = @as(*coyote.Component, @ptrFromInt(component_ptr));
+    return if (cb.cAttachDeferred(placeholder, component, c_type)) 0 else 1;
+}
+
+export fn coyote_cb_remove(cb_ptr: usize, handle: u64, c_type: coyote.c_type) c_int {
+    if (cb_ptr == 0) return 1;
+    const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
+    return if (cb.cRemoveExisting(handle, coyote.typeToIdC(c_type))) 0 else 1;
+}
+
+export fn coyote_cb_remove_deferred(cb_ptr: usize, placeholder: u32, c_type: coyote.c_type) c_int {
+    if (cb_ptr == 0) return 1;
+    const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
+    return if (cb.cRemoveDeferred(placeholder, coyote.typeToIdC(c_type))) 0 else 1;
+}

@@ -94,6 +94,16 @@ int main(void) {
     printf("Number of entities: %d == 1\n", coyote_entities_count(world));
     printf("Number of components: %d == 2\n", coyote_components_count(world));
 
+    // Command buffer: defer a spawn + attach, apply on flush.
+    command_buffer cb = coyote_command_buffer_create(world);
+    uint32_t spawned = coyote_cb_spawn(cb);
+    component c_deferred = coyote_component_create(world, t_orange);
+    coyote_cb_attach_deferred(cb, spawned, c_deferred, t_orange);
+    printf("Entities before flush: %d\n", coyote_entities_count(world));
+    coyote_command_buffer_flush(cb);
+    printf("Entities after flush: %d\n", coyote_entities_count(world));
+    coyote_command_buffer_destroy(cb);
+
     coyote_world_destroy(world);
     printf("World destroyed.\n");
     return 0;

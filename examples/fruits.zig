@@ -130,6 +130,21 @@ pub fn main() !void {
     const recycled = try world.entities.create(); // reuses the freed slot
     std.log.info("Old handle resolves to recycled slot: {}", .{world.entities.resolve(handle) != null});
     recycled.destroy();
+
+    //Command buffer: record structural changes now, apply them all at flush.
+    var cb = world.commandBuffer();
+    defer cb.deinit();
+    const spawned = try cb.createEntity();
+    try cb.attachDeferred(spawned, Components.Apple{ .color = 7, .ripe = false, .harvested = false });
+    std.log.info("Entities before flush: {}", .{world.entities.count()});
+    try cb.flush();
+    std.log.info("Entities after flush: {}", .{world.entities.count()});
+    std.log.info("Apple entities after deferred spawn: {}", .{blk: {
+        var c: u32 = 0;
+        var qi = world.entities.iteratorFilter(Components.Apple);
+        while (qi.next()) |_| c += 1;
+        break :blk c;
+    }});
 }
 
 pub fn Grow(world: *World) void {

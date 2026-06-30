@@ -59,6 +59,24 @@ int coyote_entities_count(world world);
 void* coyote_component_get(component component);
 void coyote_component_destroy(component component);
 
+// Command buffer: record structural mutations and apply them later (e.g.
+// between scheduler stages, or after iterating a query).
+typedef uintptr_t command_buffer;
+#define COYOTE_CB_BAD_INDEX ((uint32_t)0xFFFFFFFF) // returned by spawn on failure
+
+command_buffer coyote_command_buffer_create(world world);
+void coyote_command_buffer_destroy(command_buffer cb);
+int coyote_command_buffer_flush(command_buffer cb);   // apply + reset; 0 on success
+void coyote_command_buffer_reset(command_buffer cb);  // discard without applying
+
+uint32_t coyote_cb_spawn(command_buffer cb);          // deferred entity placeholder
+int coyote_cb_destroy_entity(command_buffer cb, coyote_entity_ref handle);
+int coyote_cb_destroy_entity_deferred(command_buffer cb, uint32_t placeholder);
+int coyote_cb_attach(command_buffer cb, coyote_entity_ref handle, component component, coyote_type type);
+int coyote_cb_attach_deferred(command_buffer cb, uint32_t placeholder, component component, coyote_type type);
+int coyote_cb_remove(command_buffer cb, coyote_entity_ref handle, coyote_type type);
+int coyote_cb_remove_deferred(command_buffer cb, uint32_t placeholder, coyote_type type);
+
 #ifdef __cplusplus
 }
 #endif

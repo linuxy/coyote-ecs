@@ -91,6 +91,12 @@ uint32_t coyote_scheduler_add_stage(scheduler sched);
 int coyote_scheduler_add_system(scheduler sched, uint32_t stage, coyote_system system, void* user_data);
 int coyote_scheduler_run(scheduler sched);
 
+// Resources: one singleton value per type per world (delta time, input, etc.).
+int coyote_resource_insert(world world, coyote_type type, const void* data);
+void* coyote_resource_get(world world, coyote_type type);
+int coyote_resource_has(world world, coyote_type type);
+void coyote_resource_remove(world world, coyote_type type);
+
 #ifdef __cplusplus
 }
 #endif

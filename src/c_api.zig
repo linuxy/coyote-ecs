@@ -442,3 +442,30 @@ export fn coyote_scheduler_run(sched_ptr: usize) c_int {
     sched.run() catch return 1;
     return 0;
 }
+
+// --- Resources: world-scoped singletons ---
+
+export fn coyote_resource_insert(world_ptr: usize, c_type: coyote.c_type, data: *const anyopaque) c_int {
+    if (world_ptr == 0 or @intFromPtr(data) == 0) return 1;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    world.resources.cInsert(world.allocator, c_type, data) catch return 1;
+    return 0;
+}
+
+export fn coyote_resource_get(world_ptr: usize, c_type: coyote.c_type) ?*anyopaque {
+    if (world_ptr == 0) return null;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    return world.resources.cGet(c_type);
+}
+
+export fn coyote_resource_has(world_ptr: usize, c_type: coyote.c_type) c_int {
+    if (world_ptr == 0) return 0;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    return if (world.resources.cContains(c_type)) 1 else 0;
+}
+
+export fn coyote_resource_remove(world_ptr: usize, c_type: coyote.c_type) void {
+    if (world_ptr == 0) return;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    world.resources.cRemove(world.allocator, c_type);
+}

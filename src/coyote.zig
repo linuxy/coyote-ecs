@@ -516,10 +516,99 @@ var type_idx: usize = 0;
 var entities_idx: usize = 0;
 var components_idx: usize = 0;
 
+//World-scoped singletons keyed by type (delta time, input, config, etc.). Uses
+//the same type-id registry as components so the C API can address resources by
+//`coyote_type`. At most one value per type per world; inserting again replaces.
+pub const Resources = struct {
+    const Entry = struct {
+        ptr: *anyopaque,
+        size: usize,
+        alignment: u8,
+    };
+
+    store: std.HashMapUnmanaged(u32, Entry, std.hash_map.AutoContext(u32), 80) = .{},
+
+    pub fn deinit(self: *Resources, alloc: std.mem.Allocator) void {
+        if (self.store.count() != 0) {
+            var it = self.store.iterator();
+            while (it.next()) |entry| {
+                opaqueDestroy(alloc, entry.value_ptr.ptr, entry.value_ptr.size, entry.value_ptr.alignment);
+            }
+        }
+        self.store.deinit(alloc);
+    }
+
+    pub fn insert(self: *Resources, alloc: std.mem.Allocator, comptime T: type, value: T) !void {
+        const id = typeToId(T);
+        if (self.store.get(id)) |existing| {
+            opaqueDestroy(alloc, existing.ptr, existing.size, existing.alignment);
+            _ = self.store.remove(id);
+        }
+        const ptr = try alloc.create(T);
+        ptr.* = value;
+        try self.store.put(alloc, id, .{
+            .ptr = ptr,
+            .size = @sizeOf(T),
+            .alignment = @alignOf(T),
+        });
+    }
+
+    pub fn get(self: *Resources, comptime T: type) ?*T {
+        const id = typeToId(T);
+        const entry = self.store.get(id) orelse return null;
+        return @ptrCast(@alignCast(entry.ptr));
+    }
+
+    pub inline fn contains(self: *Resources, comptime T: type) bool {
+        return self.get(T) != null;
+    }
+
+    pub fn remove(self: *Resources, alloc: std.mem.Allocator, comptime T: type) void {
+        const id = typeToId(T);
+        if (self.store.fetchRemove(id)) |kv| {
+            opaqueDestroy(alloc, kv.value.ptr, kv.value.size, kv.value.alignment);
+        }
+    }
+
+    pub fn cInsert(self: *Resources, alloc: std.mem.Allocator, ct: c_type, data: *const anyopaque) !void {
+        const id = typeToIdC(ct);
+        const size = types_size[@intCast(id)];
+        const align_val = types_align[@intCast(id)];
+
+        if (self.store.get(id)) |existing| {
+            opaqueDestroy(alloc, existing.ptr, existing.size, existing.alignment);
+            _ = self.store.remove(id);
+        }
+
+        const mem = alloc.rawAlloc(size, .fromByteUnits(align_val), @returnAddress()) orelse return error.OutOfMemory;
+        @memcpy(mem[0..size], @as([*]const u8, @ptrCast(data))[0..size]);
+        try self.store.put(alloc, id, .{ .ptr = mem, .size = size, .alignment = align_val });
+    }
+
+    pub fn cGet(self: *Resources, ct: c_type) ?*anyopaque {
+        const id = typeToIdC(ct);
+        const entry = self.store.get(id) orelse return null;
+        return entry.ptr;
+    }
+
+    pub fn cContains(self: *Resources, ct: c_type) bool {
+        const id = typeToIdC(ct);
+        return self.store.contains(id);
+    }
+
+    pub fn cRemove(self: *Resources, alloc: std.mem.Allocator, ct: c_type) void {
+        const id = typeToIdC(ct);
+        if (self.store.fetchRemove(id)) |kv| {
+            opaqueDestroy(alloc, kv.value.ptr, kv.value.size, kv.value.alignment);
+        }
+    }
+};
+
 pub const World = struct {
     //Superset of Entities and Systems
     entities: SuperEntities,
     components: SuperComponents,
+    resources: Resources = .{},
     _entities: []Entities,
     _components: []_Components,
     entities_len: usize = 0,
@@ -542,6 +631,7 @@ pub const World = struct {
         world.allocator = allocator;
         world.entities.world = world;
         world.components.world = world;
+        world.resources = .{};
 
         world.entities_len = 1;
         world.components_len = 1;
@@ -593,12 +683,25 @@ pub const World = struct {
         return Scheduler.init(self);
     }
 
+    pub fn insertResource(self: *World, comptime T: type, value: T) !void {
+        try self.resources.insert(self.allocator, T, value);
+    }
+
+    pub inline fn getResource(self: *World, comptime T: type) ?*T {
+        return self.resources.get(T);
+    }
+
+    pub fn removeResource(self: *World, comptime T: type) void {
+        self.resources.remove(self.allocator, T);
+    }
+
     pub fn destroy(self: *World) void {
         var it = self.components.iterator();
         while (it.next()) |component|
             component.destroy();
 
         self.components.gc();
+        self.resources.deinit(self.allocator);
         var i: usize = 0;
         while (i < self.components_len) : (i += 1)
             self.allocator.free(self._components[i].sparse);
@@ -1588,14 +1691,19 @@ pub const CommandBuffer = struct {
 pub const SystemContext = struct {
     world: *World,
     commands: *CommandBuffer,
+
+    //Returns a mutable pointer to a world-scoped singleton of type `T`, or null
+    //if none has been inserted yet.
+    pub inline fn resource(self: *SystemContext, comptime T: type) ?*T {
+        return self.world.resources.get(T);
+    }
 };
 
 //A simple ordered, staged system runner. Systems are grouped into stages; stages
 //execute in creation order, and within a stage systems run in registration
 //order. The shared command buffer is flushed at the end of each stage, so
 //structural changes a stage records become visible to later stages but never
-//mid-stage. This is the minimal backbone a game/sim loop is built on; resources
-//(shared singletons) are a natural future addition to SystemContext.
+//mid-stage. Systems read/write world resources via `SystemContext.resource`.
 pub const Scheduler = struct {
     pub const SystemFn = *const fn (*SystemContext) anyerror!void;
 
@@ -1994,4 +2102,46 @@ test "scheduler flushes commands between stages" {
 
     try std.testing.expectEqual(@as(u32, 0), S.seen_before); // not visible mid-stage
     try std.testing.expectEqual(@as(u32, 1), S.seen_after); // visible next stage
+}
+
+test "resources are singleton per type per world" {
+    const Time = struct { tick: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    try world.insertResource(Time, .{ .tick = 1 });
+    try std.testing.expectEqual(@as(u32, 1), world.getResource(Time).?.tick);
+
+    try world.insertResource(Time, .{ .tick = 2 }); // replace
+    try std.testing.expectEqual(@as(u32, 2), world.getResource(Time).?.tick);
+
+    world.removeResource(Time);
+    try std.testing.expect(world.getResource(Time) == null);
+}
+
+test "systems access resources through SystemContext" {
+    const Time = struct { tick: u32 = 0 };
+    const S = struct {
+        var tick_after: u32 = 0;
+        fn bump(ctx: *SystemContext) anyerror!void {
+            if (ctx.resource(Time)) |t| t.tick += 1;
+        }
+        fn read(ctx: *SystemContext) anyerror!void {
+            tick_after = ctx.resource(Time).?.tick;
+        }
+    };
+    S.tick_after = 0;
+
+    var world = try World.create();
+    defer world.destroy();
+    try world.insertResource(Time, .{ .tick = 10 });
+
+    var sched = world.scheduler();
+    defer sched.deinit();
+    try sched.addSystem(0, S.bump);
+    try sched.addSystem(1, S.read);
+    try sched.run();
+
+    try std.testing.expectEqual(@as(u32, 11), S.tick_after);
 }

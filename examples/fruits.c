@@ -20,13 +20,20 @@ typedef struct pear {
     int harvested;
 } pear;
 
+typedef struct game_time {
+    uint32_t tick;
+} game_time;
+
 static const coyote_type t_apple = COYOTE_MAKE_TYPE(0, apple);
 static const coyote_type t_orange = COYOTE_MAKE_TYPE(1, orange);
 static const coyote_type t_pear = COYOTE_MAKE_TYPE(2, pear);
+static const coyote_type t_time = COYOTE_MAKE_TYPE(100, game_time);
 
 // Stage 0 system: record a deferred spawn into the command buffer.
 static void sys_spawn(world w, command_buffer cb, void* user_data) {
     (void)user_data;
+    game_time* time = coyote_resource_get(w, t_time);
+    if(time) time->tick += 1;
     uint32_t e = coyote_cb_spawn(cb);
     component c = coyote_component_create(w, t_orange);
     coyote_cb_attach_deferred(cb, e, c, t_orange);
@@ -36,6 +43,9 @@ static void sys_spawn(world w, command_buffer cb, void* user_data) {
 static void sys_count(world w, command_buffer cb, void* user_data) {
     (void)cb;
     *(int*)user_data = coyote_entities_count(w);
+    game_time* time = coyote_resource_get(w, t_time);
+    if(time)
+        printf("Scheduler tick resource: %u\n", time->tick);
 }
 
 int main(void) {
@@ -119,6 +129,8 @@ int main(void) {
     coyote_command_buffer_destroy(cb);
 
     // Scheduler: stage 0 spawns (deferred), stage 1 observes after the flush.
+    game_time gt = { .tick = 0 };
+    coyote_resource_insert(world, t_time, &gt);
     scheduler sched = coyote_scheduler_create(world);
     int observed = -1;
     coyote_scheduler_add_system(sched, 0, sys_spawn, NULL);

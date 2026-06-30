@@ -6,6 +6,10 @@ const Cast = ecs.Cast;
 const Systems = ecs.Systems;
 const SystemContext = ecs.SystemContext;
 
+const GameTime = struct {
+    tick: u32 = 0,
+};
+
 //Name configured in ECS constants
 pub const Components = struct {
     pub const Apple = struct {
@@ -134,6 +138,7 @@ pub fn main() !void {
 
     //Scheduler: a stage-0 system spawns entities (deferred), and a stage-1
     //system observes them after the command buffer is flushed between stages.
+    try world.insertResource(GameTime, .{ .tick = 0 });
     var sched = world.scheduler();
     defer sched.deinit();
     try sched.addSystem(0, Spawn);
@@ -144,6 +149,7 @@ pub fn main() !void {
 
 //Stage 0: record a few deferred spawns via the command buffer.
 pub fn Spawn(ctx: *SystemContext) anyerror!void {
+    if (ctx.resource(GameTime)) |time| time.tick += 1;
     var i: usize = 0;
     while (i < 3) : (i += 1) {
         const e = try ctx.commands.createEntity();
@@ -156,7 +162,8 @@ pub fn Observe(ctx: *SystemContext) anyerror!void {
     var count: u32 = 0;
     var it = ctx.world.entities.iteratorFilter(Components.Apple);
     while (it.next()) |_| count += 1;
-    std.log.info("Apple entities after scheduler run: {}", .{count});
+    const tick = if (ctx.resource(GameTime)) |time| time.tick else 0;
+    std.log.info("Apple entities after scheduler run: {} (tick={})", .{ count, tick });
 }
 
 pub fn Grow(world: *World) void {

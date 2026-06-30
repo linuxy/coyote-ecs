@@ -6,14 +6,19 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stddef.h>
 
 typedef struct coyote_type {
     uintptr_t id;
     uintptr_t size;        // component sizeof
-    const char* name;   // component name
+    uint8_t alignof;       // component alignment (must match Zig c_type ABI)
+    const char* name;      // component name
 } coyote_type;
 
-#define COYOTE_MAKE_TYPE(TypeId, TypeName) { .id = TypeId, .size = sizeof(TypeName) , .name = #TypeName }
+// Portable (C99) alignment query via the classic offsetof trick.
+#define COYOTE_ALIGNOF(TypeName) offsetof(struct { char coyote_pad; TypeName coyote_val; }, coyote_val)
+
+#define COYOTE_MAKE_TYPE(TypeId, TypeName) { .id = TypeId, .size = sizeof(TypeName), .alignof = (uint8_t)COYOTE_ALIGNOF(TypeName), .name = #TypeName }
 
 typedef uintptr_t entity;
 typedef uintptr_t component;

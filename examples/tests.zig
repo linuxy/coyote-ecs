@@ -29,18 +29,22 @@ pub const Components = struct {
 };
 
 pub fn main() !void {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var world = try World.create();
     defer world.destroy();
 
     std.debug.print("Creating {} entities ... ", .{NUM});
-    try elapsed(tests_entity_create, .{world});
+    try elapsed(io, tests_entity_create, .{world});
     std.debug.print("Iterating {} entities ... ", .{NUM});
-    try elapsed(tests_entity_iterate, .{world});
+    try elapsed(io, tests_entity_iterate, .{world});
 
     // Break down component creation into chunks
     std.debug.print("Creating {} emplaced components and entities in chunks of {} ", .{ NUM, CHUNK_SIZE });
     var chunk_start: usize = 0;
-    const then = std.time.milliTimestamp();
+    const then = nowTimestamp(io);
     while (chunk_start < NUM) : (chunk_start += CHUNK_SIZE) {
         const chunk_end = @min(chunk_start + CHUNK_SIZE, NUM);
         //std.debug.print("Processing chunk {}/{} ({}-{})...\n", .{ chunk_start / CHUNK_SIZE + 1, (NUM + CHUNK_SIZE - 1) / CHUNK_SIZE, chunk_start, chunk_end });
@@ -49,13 +53,13 @@ pub fn main() !void {
         // Add a GC call after each chunk to prevent memory buildup
         world.components.gc();
     }
-    std.debug.print("completed in {}ms.\n", .{std.time.milliTimestamp() - then});
+    std.debug.print("completed in {}ms.\n", .{elapsedMs(io, then)});
     std.debug.print("Iterating {} components ... ", .{NUM});
-    try elapsed(tests_component_iterate, .{world});
+    try elapsed(io, tests_component_iterate, .{world});
     std.debug.print("Destroying and deallocating {} components ... ", .{NUM});
-    try elapsed(tests_component_destroy, .{world});
+    try elapsed(io, tests_component_destroy, .{world});
     std.debug.print("Destroying {} entities ... ", .{NUM});
-    try elapsed(tests_entity_destroy, .{world});
+    try elapsed(io, tests_entity_destroy, .{world});
 }
 
 pub fn tests_entity_create(world: *World) !void {
@@ -128,9 +132,18 @@ pub fn tests_component_destroy(world: *World) !void {
     std.debug.print("(Destroyed {} components) ", .{count});
 }
 
-pub fn elapsed(comptime f: anytype, args: anytype) !void {
-    const then = std.time.milliTimestamp();
+fn nowTimestamp(io: std.Io) std.Io.Clock.Timestamp {
+    return std.Io.Clock.Timestamp.now(io, .awake);
+}
+
+fn elapsedMs(io: std.Io, then: std.Io.Clock.Timestamp) i64 {
+    const duration = then.durationTo(nowTimestamp(io));
+    return @intCast(@divFloor(duration.raw.nanoseconds, std.time.ns_per_ms));
+}
+
+pub fn elapsed(io: std.Io, comptime f: anytype, args: anytype) !void {
+    const then = nowTimestamp(io);
     const ret = @call(.auto, f, args);
     if (@typeInfo(@TypeOf(ret)) == .error_union) try ret;
-    std.debug.print("completed in {}ms.\n", .{std.time.milliTimestamp() - then});
+    std.debug.print("completed in {}ms.\n", .{elapsedMs(io, then)});
 }

@@ -104,7 +104,7 @@ pub const SuperComponents = struct {
 
         var i: usize = 0;
         while (i < MAX_COMPONENTS) : (i += 1) {
-            world._components[world.components_len].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
+            world._components[world.components_len].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).empty;
         }
 
         world.components_len += 1;
@@ -161,8 +161,7 @@ pub const SuperComponents = struct {
                 const mod = i / CHUNK_SIZE;
                 const rems = blk: {
                     var result: @Vector(vector_width, u32) = undefined;
-                    var j: u32 = 0;
-                    while (j < vector_width) : (j += 1) {
+                    inline for (0..vector_width) |j| {
                         result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
                     }
                     break :blk result;
@@ -171,8 +170,7 @@ pub const SuperComponents = struct {
                 // Process multiple mask checks in parallel
                 const masks = blk: {
                     var result: @Vector(vector_width, bool) = undefined;
-                    var j: u32 = 0;
-                    while (j < vector_width) : (j += 1) {
+                    inline for (0..vector_width) |j| {
                         result[j] = it.world._components[mod].entity_mask[it.filter_type].isSet(rems[j]);
                     }
                     break :blk result;
@@ -221,8 +219,7 @@ pub const SuperComponents = struct {
                 const mod = i / CHUNK_SIZE;
                 const rems = blk: {
                     var result: @Vector(vector_width, u32) = undefined;
-                    var j: u32 = 0;
-                    while (j < vector_width) : (j += 1) {
+                    inline for (0..vector_width) |j| {
                         result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
                     }
                     break :blk result;
@@ -231,8 +228,7 @@ pub const SuperComponents = struct {
                 // Process multiple mask checks in parallel
                 const masks = blk: {
                     var result: @Vector(vector_width, bool) = undefined;
-                    var j: u32 = 0;
-                    while (j < vector_width) : (j += 1) {
+                    inline for (0..vector_width) |j| {
                         result[j] = it.world._components[mod].entity_mask[it.filter_type].isSet(rems[j]);
                     }
                     break :blk result;
@@ -282,21 +278,23 @@ pub const SuperComponents = struct {
 
                 // Prepare vectors for parallel processing
                 var owner_checks: @Vector(vector_width, bool) = @splat(false);
-                var component_indices: @Vector(vector_width, u32) = undefined;
+                var component_indices: @Vector(vector_width, u32) = @splat(0);
 
                 // Fill vectors with component data
-                for (0..batch_size) |i| {
-                    const idx = it.outer_index + i;
-                    const rem = @rem(idx, CHUNK_SIZE);
-                    const mod = idx / CHUNK_SIZE;
-                    component_indices[i] = @intCast(rem);
-                    //owner_checks[i] = it.world._entities[idx].component_mask[it.filter_type].isSet(it.entity.id);
-                    owner_checks[i] = it.world._components[mod].sparse[rem].owners.isSet(it.entity.id);
+                inline for (0..vector_width) |i| {
+                    if (i < batch_size) {
+                        const idx = it.outer_index + i;
+                        const rem = @rem(idx, CHUNK_SIZE);
+                        const mod = idx / CHUNK_SIZE;
+                        component_indices[i] = @intCast(rem);
+                        //owner_checks[i] = it.world._entities[idx].component_mask[it.filter_type].isSet(it.entity.id);
+                        owner_checks[i] = it.world._components[mod].sparse[rem].owners.isSet(it.entity.id);
+                    }
                 }
 
                 // Process components that are owned by the entity
-                for (0..batch_size) |i| {
-                    if (owner_checks[i]) {
+                inline for (0..vector_width) |i| {
+                    if (i < batch_size and owner_checks[i]) {
                         const mod = (it.outer_index + i) / CHUNK_SIZE;
                         const rem = component_indices[i];
 
@@ -389,8 +387,7 @@ pub const _Components = struct {
         while (i + vector_width <= ctx.alive) : (i += vector_width) {
             const rems = blk: {
                 var result: @Vector(vector_width, u32) = undefined;
-                var j: u32 = 0;
-                while (j < vector_width) : (j += 1) {
+                inline for (0..vector_width) |j| {
                     result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
                 }
                 break :blk result;
@@ -429,8 +426,7 @@ pub const _Components = struct {
         while (i + vector_width <= end_idx) : (i += vector_width) {
             const rems = blk: {
                 var result: @Vector(vector_width, u32) = undefined;
-                var j: u32 = 0;
-                while (j < vector_width) : (j += 1) {
+                inline for (0..vector_width) |j| {
                     result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
                 }
                 break :blk result;
@@ -496,8 +492,8 @@ pub const _Components = struct {
         component.typeId = typeToId(comp_type);
         component.id = ctx.free_idx;
         component.alive = true;
-        component.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
-        component.type_node = .{ .data = component };
+        component.owners = std.StaticBitSet(CHUNK_SIZE).empty;
+        component.type_node = .{};
         component.chunk = ctx.chunk;
         component.data = null;
         component.allocated = false;
@@ -551,8 +547,8 @@ pub const _Components = struct {
         component.typeId = typeToIdC(comp_type);
         component.id = ctx.free_idx;
         component.alive = true;
-        component.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
-        component.type_node = .{ .data = component };
+        component.owners = std.StaticBitSet(CHUNK_SIZE).empty;
+        component.type_node = .{};
         component.chunk = ctx.chunk;
         component.data = null;
         component.allocated = false;
@@ -629,8 +625,8 @@ pub const World = struct {
 
         var i: usize = 0;
         while (i < MAX_COMPONENTS) {
-            world._entities[entities_idx].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
-            world._components[components_idx].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
+            world._entities[entities_idx].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).empty;
+            world._components[components_idx].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).empty;
             i += 1;
         }
 
@@ -668,7 +664,7 @@ pub const Component = struct {
     typeId: ?u32 = undefined,
     allocated: bool = false,
     alive: bool = false,
-    type_node: std.DoublyLinkedList(*Component).Node,
+    type_node: std.DoublyLinkedList.Node,
     magic: usize = MAGIC,
 
     pub inline fn is(self: *const Component, comp_type: anytype) bool {
@@ -681,8 +677,8 @@ pub const Component = struct {
 
     pub inline fn set(component: *Component, comptime comp_type: type, members: anytype) !void {
         const field_ptr = @as(*comp_type, @ptrCast(@alignCast(component.data)));
-        inline for (std.meta.fields(@TypeOf(members))) |sets| {
-            @field(field_ptr, sets.name) = @field(members, sets.name);
+        inline for (@typeInfo(@TypeOf(members)).@"struct".field_names) |name| {
+            @field(field_ptr, name) = @field(members, name);
         }
     }
 
@@ -691,7 +687,7 @@ pub const Component = struct {
 
         //TODO: Entities mask TBD
         self.attached = false;
-        self.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
+        self.owners = std.StaticBitSet(CHUNK_SIZE).empty;
     }
 
     pub inline fn dealloc(self: *Component) void {
@@ -709,7 +705,7 @@ pub const Component = struct {
         //TODO: Destroy data? If allocated just hold to reuse.
         if (self.alive and self.magic == MAGIC) {
             self.attached = false;
-            self.owners = std.StaticBitSet(CHUNK_SIZE).initEmpty();
+            self.owners = std.StaticBitSet(CHUNK_SIZE).empty;
             self.alive = false;
 
             if (world._components[self.chunk].alive > 0)
@@ -833,8 +829,8 @@ pub const Entity = struct {
 
     pub inline fn set(self: *Entity, component: *Component, comptime comp_type: type, members: anytype) !void {
         var field_ptr = @as(*comp_type, @ptrCast(component.data));
-        inline for (std.meta.fields(@TypeOf(members))) |sets| {
-            @field(field_ptr, sets.name) = @field(members, sets.name);
+        inline for (@typeInfo(@TypeOf(members)).@"struct".field_names) |name| {
+            @field(field_ptr, name) = @field(members, name);
         }
         _ = self;
     }
@@ -934,7 +930,7 @@ pub const SuperEntities = struct {
 
         var i: usize = 0;
         while (i < MAX_COMPONENTS) : (i += 1) {
-            world._entities[world.entities_len].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).initEmpty();
+            world._entities[world.entities_len].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).empty;
         }
 
         world.entities_len += 1;

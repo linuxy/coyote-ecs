@@ -559,6 +559,7 @@ pub const World = struct {
         for (world._entities[entities_idx].sparse) |*e| {
             e.alive = false;
             e.generation = 0;
+            e.owned = .{};
         }
 
         world.systems = Systems{};
@@ -591,6 +592,14 @@ pub const World = struct {
             self.allocator.free(self._components[i].sparse);
 
         self.allocator.free(self._components);
+
+        //Free any remaining per-entity reverse-index spill lists. Destroying
+        //components above already removed entries for live entities; this
+        //reclaims lists for entities the caller never explicitly destroyed.
+        i = 0;
+        while (i < self.entities_len) : (i += 1) {
+            for (self._entities[i].sparse) |*e| e.owned.clear(self.allocator);
+        }
 
         i = 0;
         while (i < self.entities_len) : (i += 1)
@@ -707,6 +716,68 @@ pub const OwnerSet = struct {
     }
 };
 
+//Reverse index of the components an entity owns. Mirrors OwnerSet on the
+//component side so destroy()/detach() are O(owned) instead of scanning every
+//component slot in the world. Optimized for the common handful-of-components
+//case: the first owned component is stored inline with no allocation, and the
+//`rest` list is only allocated once a second component is added.
+//Component pointers are stable (per-chunk sparse arrays are never reallocated).
+pub const OwnedComponents = struct {
+    len: u32 = 0,
+    first: ?*Component = null,
+    rest: std.ArrayListUnmanaged(*Component) = .empty,
+
+    pub inline fn count(self: *const OwnedComponents) u32 {
+        return self.len;
+    }
+
+    pub fn contains(self: *const OwnedComponents, c: *Component) bool {
+        if (self.len == 0) return false;
+        if (self.first == c) return true;
+        for (self.rest.items) |o| {
+            if (o == c) return true;
+        }
+        return false;
+    }
+
+    pub fn add(self: *OwnedComponents, alloc: std.mem.Allocator, c: *Component) !void {
+        if (self.contains(c)) return;
+        if (self.len == 0) {
+            self.first = c;
+        } else {
+            try self.rest.append(alloc, c);
+        }
+        self.len += 1;
+    }
+
+    pub fn remove(self: *OwnedComponents, c: *Component) void {
+        if (self.len == 0) return;
+        if (self.first == c) {
+            self.first = self.rest.pop() orelse null;
+            self.len -= 1;
+            return;
+        }
+        for (self.rest.items, 0..) |o, i| {
+            if (o == c) {
+                _ = self.rest.swapRemove(i);
+                self.len -= 1;
+                return;
+            }
+        }
+    }
+
+    //Returns the owned component at iteration position `k` (0-based).
+    pub inline fn at(self: *const OwnedComponents, k: u32) *Component {
+        return if (k == 0) self.first.? else self.rest.items[k - 1];
+    }
+
+    pub fn clear(self: *OwnedComponents, alloc: std.mem.Allocator) void {
+        self.rest.clearAndFree(alloc);
+        self.first = null;
+        self.len = 0;
+    }
+};
+
 pub const Component = struct {
     chunk: usize,
     id: u32,
@@ -741,13 +812,25 @@ pub const Component = struct {
         }
     }
 
+    //Removes this component from every owning entity's reverse index and then
+    //clears the owner set, keeping the entity->component and component->entity
+    //views consistent whenever a component is detached or destroyed.
+    fn releaseOwners(self: *Component, world: *World) void {
+        if (self.owners.len > 0) {
+            if (resolveGlobalId(world, self.owners.first)) |e| e.owned.remove(self);
+            for (self.owners.rest.items) |gid| {
+                if (resolveGlobalId(world, gid)) |e| e.owned.remove(self);
+            }
+        }
+        self.owners.clear(world.allocator);
+    }
+
     //Detaches from all entities
     pub inline fn detach(self: *Component) void {
         const world = @as(*World, @ptrCast(@alignCast(self.world)));
 
-        //TODO: Entities mask TBD
         self.attached = false;
-        self.owners.clear(world.allocator);
+        self.releaseOwners(world);
     }
 
     pub inline fn dealloc(self: *Component) void {
@@ -765,7 +848,7 @@ pub const Component = struct {
         //TODO: Destroy data? If allocated just hold to reuse.
         if (self.alive and self.magic == MAGIC) {
             self.attached = false;
-            self.owners.clear(world.allocator);
+            self.releaseOwners(world);
             self.alive = false;
 
             if (world._components[self.chunk].alive > 0)
@@ -787,6 +870,7 @@ pub const Entity = struct {
     alive: bool,
     world: ?*anyopaque,
     allocated: bool = false,
+    owned: OwnedComponents = .{}, //reverse index of components this entity owns
 
     //Returns a stable handle that can be stored and later validated with
     //`world.entities.resolve`/`isValid`, even after this slot is recycled.
@@ -888,6 +972,7 @@ pub const Entity = struct {
 
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
         try component.owners.add(world.allocator, entityGlobalId(self));
+        try self.owned.add(world.allocator, component);
     }
 
     pub fn attach_c(self: *Entity, component: *Component, comp_type: *c_type) !void {
@@ -919,6 +1004,7 @@ pub const Entity = struct {
 
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
         try component.owners.add(world.allocator, entityGlobalId(self));
+        try self.owned.add(world.allocator, component);
     }
 
     pub inline fn detach(self: *Entity, component: *Component) !void {
@@ -926,11 +1012,30 @@ pub const Entity = struct {
 
         component.attached = false;
         component.owners.remove(entityGlobalId(self));
+        self.owned.remove(component);
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, false);
     }
 
     pub inline fn destroy(self: *Entity) void {
         var world = @as(*World, @ptrCast(@alignCast(self.world)));
+        const gid = entityGlobalId(self);
+
+        //Release ownership of every component this entity owns (O(owned), via
+        //the reverse index). A component left with no remaining owners is
+        //destroyed so its slot can be reclaimed by gc. Components shared with
+        //other entities stay alive. We iterate by index and clear afterward;
+        //destroying an ownerless component touches no owners, so `owned` is not
+        //mutated underneath us during the loop.
+        var k: u32 = 0;
+        while (k < self.owned.len) : (k += 1) {
+            const component = self.owned.at(k);
+            component.owners.remove(gid);
+            if (component.typeId) |tid|
+                world._entities[self.chunk].component_mask[@as(usize, @intCast(tid))].setValue(component.id, false);
+            if (component.owners.count() == 0)
+                component.destroy();
+        }
+        self.owned.clear(world.allocator);
 
         self.alive = false;
         //Invalidate any outstanding handles to this slot. Wrapping so a slot
@@ -1047,6 +1152,7 @@ pub const SuperEntities = struct {
         for (world._entities[world.entities_len].sparse) |*e| {
             e.alive = false;
             e.generation = 0;
+            e.owned = .{};
         }
 
         var i: usize = 0;
@@ -1122,7 +1228,10 @@ pub const SuperEntities = struct {
     pub inline fn iterator(ctx: *SuperEntities) SuperEntities.Iterator {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const entities = &world._entities;
-        return .{ .ctx = entities, .alive = ctx.alive };
+        //Scan the full allocated slot range and skip dead slots. Using the live
+        //*count* as the bound (the old behavior) silently missed live entities
+        //whenever destroyed slots left holes below the high-water mark.
+        return .{ .ctx = entities, .alive = CHUNK_SIZE * world.entities_len };
     }
 
     //Resolves a stored handle to the live entity it refers to, or null if that
@@ -1384,4 +1493,66 @@ test "queries never yield an entity through a recycled-slot owner" {
     var it = world.entities.iteratorFilter(A);
     while (it.next()) |_| count += 1;
     try std.testing.expectEqual(@as(usize, 0), count);
+}
+
+test "destroy releases owned components" {
+    const A = struct { v: u32 = 0 };
+    const B = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    const e = try world.entities.create();
+    _ = try e.addComponent(A{ .v = 1 });
+    _ = try e.addComponent(B{ .v = 2 });
+    try std.testing.expectEqual(@as(u32, 2), world.components.count());
+    try std.testing.expectEqual(@as(u32, 2), e.owned.count());
+
+    // Destroying the entity destroys the components it solely owns.
+    e.destroy();
+    try std.testing.expectEqual(@as(u32, 0), world.components.count());
+}
+
+test "shared component survives while another owner remains" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    const e1 = try world.entities.create();
+    const e2 = try world.entities.create();
+    const c = try world.components.create(A);
+    try e1.attach(c, A{ .v = 7 });
+    try e2.attach(c, A{ .v = 7 });
+    try std.testing.expectEqual(@as(u32, 2), c.owners.count());
+
+    // One owner gone: the component stays alive for the remaining owner.
+    e1.destroy();
+    try std.testing.expectEqual(@as(u32, 1), c.owners.count());
+    try std.testing.expect(c.alive);
+    try std.testing.expect(e2.has(A));
+
+    // Last owner gone: the component is destroyed.
+    e2.destroy();
+    try std.testing.expect(!c.alive);
+}
+
+test "entity iterator visits live entities despite destroyed-slot holes" {
+    var world = try World.create();
+    defer world.destroy();
+
+    const n = 10;
+    var es: [n]*Entity = undefined;
+    for (0..n) |i| es[i] = try world.entities.create();
+
+    // Punch holes in the middle of the slot range.
+    es[2].destroy();
+    es[5].destroy();
+    es[7].destroy();
+
+    var seen: usize = 0;
+    var it = world.entities.iterator();
+    while (it.next()) |_| seen += 1;
+    try std.testing.expectEqual(@as(usize, n - 3), seen);
+    try std.testing.expectEqual(@as(u32, n - 3), world.entities.count());
 }

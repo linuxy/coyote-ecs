@@ -239,7 +239,7 @@ export fn coyote_entities_iterator_filter(world_ptr: usize, c_type: coyote.c_typ
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
     const entities = &world._entities;
     const iterator = coyote.allocator.create(coyote.SuperEntities.MaskedIterator) catch unreachable;
-    iterator.* = coyote.SuperEntities.MaskedIterator{ .ctx = entities, .filter_type = coyote.typeToIdC(c_type), .alive = world.entities.alive, .world = world };
+    iterator.* = coyote.SuperEntities.MaskedIterator{ .ctx = entities, .filter_type = coyote.typeToIdC(c_type), .alive = coyote.CHUNK_SIZE * world.components_len, .world = world };
     return @intFromPtr(iterator);
 }
 

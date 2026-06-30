@@ -102,11 +102,6 @@ pub const SuperComponents = struct {
         world._components[world.components_len].chunk = world.components_len;
         world._components[world.components_len].sparse = try world.allocator.alloc(Component, CHUNK_SIZE);
 
-        var i: usize = 0;
-        while (i < MAX_COMPONENTS) : (i += 1) {
-            world._components[world.components_len].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).empty;
-        }
-
         world.components_len += 1;
         world.components_free_idx = world.components_len - 1;
         components_idx = world.components_free_idx;
@@ -155,44 +150,16 @@ pub const SuperComponents = struct {
         world: *World,
 
         pub fn next(it: *MaskedIterator) ?*Component {
-            const vector_width = std.simd.suggestVectorLength(u32) orelse 4; // Or appropriate size
-            var i: usize = it.index;
-            while (i + vector_width <= it.alive) : (i += vector_width) {
-                const mod = i / CHUNK_SIZE;
-                const rems = blk: {
-                    var result: @Vector(vector_width, u32) = undefined;
-                    inline for (0..vector_width) |j| {
-                        result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
+            while (it.index < it.alive) : (it.index += 1) {
+                const mod = it.index / CHUNK_SIZE;
+                const rem = @rem(it.index, CHUNK_SIZE);
+                const component = &it.ctx.*[mod].sparse[rem];
+                if (!component.alive) continue;
+                if (component.typeId) |tid| {
+                    if (tid == it.filter_type) {
+                        it.index += 1;
+                        return component;
                     }
-                    break :blk result;
-                };
-
-                // Process multiple mask checks in parallel
-                const masks = blk: {
-                    var result: @Vector(vector_width, bool) = undefined;
-                    inline for (0..vector_width) |j| {
-                        result[j] = it.world._components[mod].entity_mask[it.filter_type].isSet(rems[j]);
-                    }
-                    break :blk result;
-                };
-
-                // Find first match
-                inline for (0..vector_width) |j| {
-                    if (masks[j]) {
-                        it.index = i + j + 1;
-                        return &it.ctx.*[mod].sparse[@intCast(rems[j])];
-                    }
-                }
-            }
-
-            // Handle remaining elements
-            while (i < it.alive) : (i += 1) {
-                const mod = i / CHUNK_SIZE;
-                const rem = @rem(i, CHUNK_SIZE);
-                if (it.world._components[mod].entity_mask[it.filter_type].isSet(rem)) {
-                    const sparse_index = rem;
-                    it.index = i + 1;
-                    return &it.ctx.*[mod].sparse[sparse_index];
                 }
             }
 
@@ -209,48 +176,16 @@ pub const SuperComponents = struct {
         world: *World,
 
         pub fn next(it: *MaskedRangeIterator) ?*Component {
-            const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
-            var i: usize = it.index;
-
-            // Ensure we don't go beyond the end_index
-            const effective_end = @min(it.end_index, it.index + vector_width);
-
-            if (i < effective_end) {
-                const mod = i / CHUNK_SIZE;
-                const rems = blk: {
-                    var result: @Vector(vector_width, u32) = undefined;
-                    inline for (0..vector_width) |j| {
-                        result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
+            while (it.index < it.end_index) : (it.index += 1) {
+                const mod = it.index / CHUNK_SIZE;
+                const rem = @rem(it.index, CHUNK_SIZE);
+                const component = &it.ctx.*[mod].sparse[rem];
+                if (!component.alive) continue;
+                if (component.typeId) |tid| {
+                    if (tid == it.filter_type) {
+                        it.index += 1;
+                        return component;
                     }
-                    break :blk result;
-                };
-
-                // Process multiple mask checks in parallel
-                const masks = blk: {
-                    var result: @Vector(vector_width, bool) = undefined;
-                    inline for (0..vector_width) |j| {
-                        result[j] = it.world._components[mod].entity_mask[it.filter_type].isSet(rems[j]);
-                    }
-                    break :blk result;
-                };
-
-                // Find first match
-                inline for (0..vector_width) |j| {
-                    if (masks[j]) {
-                        it.index = i + j + 1;
-                        return &it.ctx.*[mod].sparse[@intCast(rems[j])];
-                    }
-                }
-            }
-
-            // Handle remaining elements
-            while (i < it.end_index) : (i += 1) {
-                const mod = i / CHUNK_SIZE;
-                const rem = @rem(i, CHUNK_SIZE);
-                if (it.world._components[mod].entity_mask[it.filter_type].isSet(rem)) {
-                    const sparse_index = rem;
-                    it.index = i + 1;
-                    return &it.ctx.*[mod].sparse[sparse_index];
                 }
             }
 
@@ -376,7 +311,6 @@ pub const _Components = struct {
     sparse: []Component,
     free_idx: u32 = 0,
     created: u32 = 0,
-    entity_mask: [MAX_COMPONENTS]std.StaticBitSet(CHUNK_SIZE), //Owns at least one component of type
     chunk: usize,
 
     pub inline fn count(ctx: *_Components) u32 {
@@ -630,7 +564,6 @@ pub const World = struct {
         var i: usize = 0;
         while (i < MAX_COMPONENTS) {
             world._entities[entities_idx].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).empty;
-            world._components[components_idx].entity_mask[i] = std.StaticBitSet(CHUNK_SIZE).empty;
             i += 1;
         }
 
@@ -896,7 +829,6 @@ pub const Entity = struct {
         component.allocated = true;
 
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
-        world._components[component.chunk].entity_mask[@as(usize, @intCast(component.typeId.?))].setValue(self.id, true);
         try component.owners.add(world.allocator, entityGlobalId(self));
     }
 
@@ -930,7 +862,6 @@ pub const Entity = struct {
         component.allocated = true;
 
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
-        world._components[component.chunk].entity_mask[@as(usize, @intCast(component.typeId.?))].setValue(self.id, true);
         try component.owners.add(world.allocator, entityGlobalId(self));
     }
 
@@ -1084,23 +1015,39 @@ pub const SuperEntities = struct {
         }
     };
 
-    //TODO: Rewrite to use bitset iterator?
+    //Yields entities that own a component of `filter_type`. Implemented by
+    //scanning components (O(components)) and resolving each matching component's
+    //owners through the global-id OwnerSet, so it is exact across entity chunks.
+    //`alive` is the component slot scan bound (CHUNK_SIZE * components_len).
+    //An entity owning N matching components is yielded N times.
     pub const MaskedIterator = struct {
         ctx: *[]Entities,
         index: usize = 0,
+        owner_idx: usize = 0,
         filter_type: u32,
         alive: usize = 0,
         world: *World,
 
         pub fn next(it: *MaskedIterator) ?*Entity {
-            while (it.index < it.alive) : (it.index += 1) {
+            while (it.index < it.alive) {
                 const mod = it.index / CHUNK_SIZE;
                 const rem = @rem(it.index, CHUNK_SIZE);
-                if (it.world._components[mod].entity_mask[it.filter_type].isSet(rem)) {
-                    const sparse_index = rem;
-                    it.index += 1;
-                    return &it.ctx.*[mod].sparse[sparse_index];
+                const component = &it.world._components[mod].sparse[rem];
+
+                const matches = component.alive and component.owners.len > 0 and
+                    (if (component.typeId) |tid| tid == it.filter_type else false);
+
+                if (matches and it.owner_idx < component.owners.len) {
+                    const k = it.owner_idx;
+                    it.owner_idx += 1;
+                    const gid = if (k == 0) component.owners.first else component.owners.rest.items[k - 1];
+                    const e_chunk: usize = @intCast(gid / CHUNK_SIZE);
+                    const e_id: usize = @intCast(gid % CHUNK_SIZE);
+                    return &it.ctx.*[e_chunk].sparse[e_id];
                 }
+
+                it.index += 1;
+                it.owner_idx = 0;
             }
 
             return null;
@@ -1117,9 +1064,8 @@ pub const SuperEntities = struct {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const entities = &world._entities;
 
-        //TODO: Go through each chunk
-        //get an iterator for entities attached to this entity
-        return .{ .ctx = entities, .filter_type = typeToId(comp_type), .alive = world.components.alive, .world = world };
+        //get an iterator for entities that own a component of this type
+        return .{ .ctx = entities, .filter_type = typeToId(comp_type), .alive = CHUNK_SIZE * world.components_len, .world = world };
     }
 
     //Multi-component query: yields entities that own a component of every

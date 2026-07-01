@@ -2,6 +2,8 @@
 
 This guide will help you get started with Coyote ECS in your Zig project.
 
+Coyote ECS requires **Zig 0.17.0** or later.
+
 ## Installation
 
 1. Clone the repository:
@@ -60,7 +62,7 @@ Create a world to manage your entities and components:
 
 ```zig
 var world = try World.create();
-defer world.deinit();
+defer world.destroy();
 ```
 
 ### 3. Create Entities and Components
@@ -69,65 +71,104 @@ defer world.deinit();
 // Create an entity
 var entity = try world.entities.create();
 
-// Create components
-var position = try world.components.create(Components.Position);
-var velocity = try world.components.create(Components.Velocity);
+// Shortcut: create + attach in one step
+_ = try entity.addComponent(Components.Position{ .x = 0, .y = 0 });
+_ = try entity.addComponent(Components.Velocity{ .x = 1, .y = 1 });
 
-// Attach components to the entity
+// Or create components separately and attach
+var position = try world.components.create(Components.Position);
 try entity.attach(position, Components.Position{ .x = 0, .y = 0 });
-try entity.attach(velocity, Components.Velocity{ .x = 1, .y = 1 });
 ```
 
-### 4. Create Systems
+### 4. Access Components on an Entity
 
-Systems are functions that operate on entities with specific components:
+Use `has`, `get`, and `remove` for typed access:
 
 ```zig
-pub fn UpdatePosition(world: *World) void {
-    var it = world.entities.iteratorFilter(Components.Position);
-    while(it.next()) |entity| {
-        if(entity.getOneComponent(Components.Velocity)) |velocity| {
-            var pos = entity.getOneComponent(Components.Position).?;
-            pos.x += velocity.x;
-            pos.y += velocity.y;
+if (entity.has(Components.Position)) {
+    if (entity.get(Components.Position)) |pos| {
+        pos.x += 1;
+    }
+}
+
+try entity.remove(Components.Velocity);
+```
+
+### 5. Query Entities
+
+Multi-component queries filter by AND / NOT:
+
+```zig
+// Entities with Position AND Velocity
+var q = world.entities.query(.{ Components.Position, Components.Velocity });
+while (q.next()) |e| {
+    if (e.get(Components.Velocity)) |vel| {
+        if (e.get(Components.Position)) |pos| {
+            pos.x += vel.x;
+            pos.y += vel.y;
         }
     }
 }
-```
 
-### 5. Run Your Systems
-
-```zig
-try Systems.run(UpdatePosition, .{world});
-```
-
-## Next Steps
-
-- Check out the [Core Concepts](core-concepts.md) guide to learn more about how Coyote ECS works
-- Explore the [Examples](examples.md) for more complex usage patterns
-- Read the [API Reference](api-reference.md) for detailed documentation
-- Learn about [Performance Optimization](performance-guide.md)
-
-## Common Patterns
-
-### Iterating Over Components
-
-```zig
-var it = world.components.iteratorFilter(Components.Position);
-while(it.next()) |component| {
-    // Work with the component
+// Entities with Position but NOT Velocity
+var q2 = world.entities.queryExclude(.{Components.Position}, .{Components.Velocity});
+while (q2.next()) |e| {
+    _ = e;
 }
 ```
 
-### Querying Entities
+Single-type filtering still works via `iteratorFilter`:
 
 ```zig
 var it = world.entities.iteratorFilter(Components.Position);
-while(it.next()) |entity| {
-    if(entity.getOneComponent(Components.Velocity)) |velocity| {
-        // Entity has both Position and Velocity components
+while (it.next()) |e| {
+    // ...
+}
+```
+
+### 6. Run Systems
+
+For simple scripts, use `Systems.run`:
+
+```zig
+pub fn UpdatePosition(world: *World) !void {
+    var q = world.entities.query(.{ Components.Position, Components.Velocity });
+    while (q.next()) |entity| {
+        if (entity.get(Components.Velocity)) |vel| {
+            if (entity.get(Components.Position)) |pos| {
+                pos.x += vel.x;
+                pos.y += vel.y;
+            }
+        }
     }
 }
+
+try Systems.run(UpdatePosition, .{world});
+```
+
+For staged game loops with deferred structural changes, use the [Scheduler and Command Buffer](game-loop.md).
+
+## Next Steps
+
+- [Core Concepts](core-concepts.md) — entities, components, queries, handles
+- [Game Loop](game-loop.md) — scheduler, command buffer, resources, events
+- [Examples](examples.md) — fruit garden, physics, scheduler demo
+- [API Reference](api-reference.md) — full function list
+- [Performance Guide](performance-guide.md)
+
+## Common Patterns
+
+### Generational Entity Handles
+
+Store `EntityRef` when an entity may be destroyed and its slot recycled:
+
+```zig
+const handle = entity.ref();
+
+entity.destroy();
+
+try std.testing.expect(!world.entities.isValid(handle));
+try std.testing.expect(world.entities.resolve(handle) == null);
 ```
 
 ### Component Lifecycle
@@ -140,8 +181,21 @@ var component = try world.components.create(Components.Position);
 try entity.attach(component, Components.Position{ .x = 0, .y = 0 });
 
 // Detach
-entity.detach(component);
+try entity.detach(component);
 
-// Destroy
+// Destroy (also called automatically when no owners remain)
 component.destroy();
-``` 
+```
+
+### World Resources
+
+Singletons shared across systems:
+
+```zig
+const GameTime = struct { tick: u32 = 0 };
+
+try world.insertResource(GameTime, .{ .tick = 0 });
+if (world.getResource(GameTime)) |time| {
+    time.tick += 1;
+}
+```

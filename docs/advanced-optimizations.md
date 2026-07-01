@@ -264,7 +264,7 @@ To measure the performance improvement from SIMD:
 ```zig
 pub fn benchmarkSimd() void {
     var world = World.create() catch return;
-    defer world.deinit();
+    defer world.destroy();
     
     // Create test entities
     var i: usize = 0;

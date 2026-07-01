@@ -1,9 +1,20 @@
 # coyote-ecs
 A fast and simple zig native ECS.
 
-Builds against zig 0.14.0
+Builds against **Zig 0.17.0**
 
-📚 [Documentation](https://linuxy.github.io/coyote-ecs/docs/)
+### Features
+
+- Entity/component accessors (`has`, `get`, `remove`)
+- Multi-component queries (`query`, `queryExclude`)
+- Generational entity handles (`EntityRef`)
+- Command buffer for deferred structural changes
+- Staged scheduler with per-stage flush
+- World resources (singletons)
+- Events (queued) and observers (synchronous)
+- Full C API parity
+
+📚 [Documentation](https://linuxy.github.io/coyote-ecs/docs/) — see [Game Loop guide](docs/game-loop.md) for scheduler, command buffer, resources, and events.
 
 ```git clone --recursive https://github.com/linuxy/coyote-ecs.git```
 
@@ -49,7 +60,7 @@ Create some entities and components in a world
 pub fn main() !void {
     //Create a world
     var world = try World.create();
-    defer world.deinit();
+    defer world.destroy();
     
     //Create an entity
     var anOrange = try world.entities.create();
@@ -93,10 +104,10 @@ pub fn main() !void {
 
     std.log.info("Apple entities: {}", .{i});
 
-    if(aPear.getOneComponent(Components.Pear) != null)
-        std.log.info("Pear entities: >= 1", .{})
+    if (aPear.has(Components.Pear))
+        std.log.info("Pear has a Pear component", .{})
     else
-        std.log.info("Pear entities: 0", .{});
+        std.log.info("Pear has no Pear component", .{});
 
     try Systems.run(Grow, .{world});
     try Systems.run(Harvest, .{world});

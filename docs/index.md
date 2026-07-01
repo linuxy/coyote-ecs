@@ -6,6 +6,7 @@ Welcome to the Coyote ECS documentation! Coyote ECS is a fast and simple Entity 
 
 - [Getting Started](getting-started.md)
 - [Core Concepts](core-concepts.md)
+- [Game Loop](game-loop.md) — scheduler, command buffer, resources, events
 - [API Reference](api-reference.md)
 - [Examples](examples.md)
 - [C API Guide](c-api-guide.md)
@@ -17,11 +18,17 @@ Coyote ECS is a lightweight, high-performance Entity Component System designed f
 
 ### Key Features
 
-- Fast and efficient component storage
-- Simple and intuitive API
-- C bindings for cross-language compatibility
-- Zero dependencies
-- Built with Zig 0.14.0
+- **Zig 0.17** — current build API and stdlib compatibility
+- **Entity/component accessors** — `has`, `get`, `remove` with C API parity
+- **Multi-component queries** — `query` / `queryExclude` with AND + NOT filtering
+- **Generational handles** — `EntityRef` survives slot recycling safely
+- **Chunk-aware ownership** — exact queries and filters across entity chunks
+- **Command buffer** — defer structural changes during iteration
+- **Staged scheduler** — ordered systems with per-stage command flush
+- **Resources** — world-scoped singletons (time, input, config)
+- **Events & observers** — queued lifecycle events and synchronous hooks
+- **C bindings** — full parity for the above
+- Zero dependencies beyond libc
 
 ## Quick Example
 
@@ -29,31 +36,35 @@ Coyote ECS is a lightweight, high-performance Entity Component System designed f
 const std = @import("std");
 const ecs = @import("coyote-ecs");
 
-// Define your components
-pub const Components = struct {
-    pub const Position = struct {
-        x: f32 = 0,
-        y: f32 = 0,
-    };
+const World = ecs.World;
+const Components = struct {
+    pub const Position = struct { x: f32 = 0, y: f32 = 0 };
 };
 
-// Create a world and entities
-var world = try World.create();
-defer world.deinit();
+pub fn main() !void {
+    var world = try World.create();
+    defer world.destroy();
 
-var entity = try world.entities.create();
-var position = try world.components.create(Components.Position);
-try entity.attach(position, Components.Position{ .x = 0, .y = 0 });
+    const entity = try world.entities.create();
+    _ = try entity.addComponent(Components.Position{ .x = 10, .y = 20 });
+
+    if (entity.get(Components.Position)) |pos| {
+        std.log.info("pos: {} {}", .{ pos.x, pos.y });
+    }
+
+    var q = world.entities.query(.{Components.Position});
+    while (q.next()) |e| {
+        _ = e;
+    }
+}
 ```
 
 ## Getting Started
 
-Check out our [Getting Started Guide](getting-started.md) to begin using Coyote ECS in your project.
+Check out the [Getting Started Guide](getting-started.md) to begin using Coyote ECS in your project.
 
-## Contributing
-
-We welcome contributions! Please see our [Contributing Guide](contributing.md) for details on how to get involved.
+For simulation and game loops, read the [Game Loop Guide](game-loop.md).
 
 ## License
 
-Coyote ECS is licensed under the same terms as Zig. See the [LICENSE](../LICENSE) file for details. 
+Coyote ECS is licensed under the same terms as Zig. See the [LICENSE](../LICENSE) file for details.

@@ -9,6 +9,10 @@ This document provides a comprehensive reference for the Coyote ECS API, includi
 - [Component](#component)
 - [SuperComponents](#supercomponents)
 - [SuperEntities](#superentities)
+- [Command Buffer](#command-buffer)
+- [Scheduler](#scheduler)
+- [Resources](#resources)
+- [Events and Observers](#events-and-observers)
 - [Systems](#systems)
 - [Iterators](#iterators)
 - [SIMD Optimizations](#simd-optimizations)
@@ -54,7 +58,7 @@ const entity = try world.entities.create();
 
 #### `destroy(self: *Entity) void`
 
-Destroys the entity.
+Destroys the entity, releases all owned components, and bumps generation.
 
 ```zig
 entity.destroy();
@@ -70,12 +74,46 @@ const component = try entity.addComponent(MyComponent{ .value = 42 });
 
 #### `getOneComponent(ctx: *Entity, comptime comp_type: type) ?*const Component`
 
-Gets a component of the specified type from the entity.
+Gets the underlying component handle of the specified type (legacy accessor).
 
 ```zig
 if (entity.getOneComponent(MyComponent)) |component| {
-    // Use component
+    // Use component handle
 }
+```
+
+#### `has(ctx: *Entity, comptime comp_type: type) bool`
+
+Returns true if the entity owns a component of the given type.
+
+```zig
+if (entity.has(MyComponent)) { /* ... */ }
+```
+
+#### `get(ctx: *Entity, comptime comp_type: type) ?*comp_type`
+
+Returns a typed pointer to component data, or null.
+
+```zig
+if (entity.get(MyComponent)) |data| {
+    data.value += 1;
+}
+```
+
+#### `remove(ctx: *Entity, comptime comp_type: type) !void`
+
+Detaches and destroys all components of the given type owned by this entity.
+
+```zig
+try entity.remove(MyComponent);
+```
+
+#### `ref(self: *const Entity) EntityRef`
+
+Returns a stable, copyable handle for this entity.
+
+```zig
+const handle = entity.ref();
 ```
 
 #### `attach(self: *Entity, component: *Component, comp_type: anytype) !void`
@@ -292,6 +330,129 @@ while (it.next()) |entity| {
 }
 ```
 
+#### `query(ctx: *SuperEntities, comptime include: anytype) SuperEntities.QueryIterator`
+
+Multi-component AND query. Yields entities owning every type in the tuple.
+
+```zig
+var q = world.entities.query(.{ Position, Velocity });
+while (q.next()) |entity| { /* ... */ }
+```
+
+#### `queryExclude(ctx: *SuperEntities, comptime include: anytype, comptime exclude: anytype) SuperEntities.QueryIterator`
+
+AND + NOT query. Yields entities with all include types and none of the exclude types.
+
+```zig
+var q = world.entities.queryExclude(.{Position}, .{Velocity});
+while (q.next()) |entity| { /* ... */ }
+```
+
+#### `resolve(ctx: *SuperEntities, handle: EntityRef) ?*Entity`
+
+Resolves a stored handle to the live entity, or null if stale.
+
+```zig
+if (world.entities.resolve(handle)) |entity| { /* ... */ }
+```
+
+#### `isValid(ctx: *SuperEntities, handle: EntityRef) bool`
+
+Returns true if the handle still refers to a live entity.
+
+```zig
+if (world.entities.isValid(handle)) { /* ... */ }
+```
+
+## Command Buffer
+
+Deferred structural mutations. Apply with `flush()`.
+
+| Function | Description |
+|----------|-------------|
+| `world.commandBuffer()` | Create a buffer bound to the world |
+| `cb.deinit()` | Free the buffer |
+| `cb.createEntity()` | Record a deferred spawn (`Deferred` placeholder) |
+| `cb.destroyEntity(ref)` | Record destroy by `EntityRef` |
+| `cb.destroyDeferred(d)` | Record destroy by placeholder |
+| `cb.attachDeferred(d, component, T)` | Attach to deferred entity |
+| `cb.attach(ref, component, T)` | Attach to resolved entity |
+| `cb.remove(ref, T)` / `cb.removeDeferred(d, T)` | Remove component type |
+| `cb.flush()` | Apply all commands in order, then reset |
+| `cb.reset()` | Discard without applying |
+
+## Scheduler
+
+Staged system execution. Flushes the command buffer after each stage.
+
+| Function | Description |
+|----------|-------------|
+| `world.scheduler()` | Create a scheduler bound to the world |
+| `sched.deinit()` | Free the scheduler |
+| `sched.addSystem(stage, fn)` | Register a `SystemFn` |
+| `sched.addSystemC(stage, cb, user_data)` | Register a C callback |
+| `sched.run()` | Run all stages in order |
+
+### SystemContext
+
+Passed to scheduler systems:
+
+```zig
+pub fn MySystem(ctx: *SystemContext) !void {
+    _ = ctx.world;
+    _ = ctx.commands;           // shared CommandBuffer
+    _ = ctx.resource(GameTime); // optional singleton access
+    _ = ctx.events();           // Events queue
+}
+```
+
+## Resources
+
+World-scoped singletons (`World.resources`).
+
+| Function | Description |
+|----------|-------------|
+| `world.insertResource(T, value)` | Insert or replace |
+| `world.getResource(T) ?*T` | Get mutable pointer |
+| `world.removeResource(T)` | Remove and free |
+
+## Events and Observers
+
+### Events (queued)
+
+| Function | Description |
+|----------|-------------|
+| `world.events.drainStructural(handler)` | Process lifecycle events |
+| `world.events.drainCustom(T, handler)` | Process typed custom events |
+| `world.events.clearAll()` | Discard all queued events |
+| `world.emitEvent(T, value)` | Enqueue a custom event |
+
+`StructuralEvent` fields: `kind` (`EventKind`), `entity` (`EntityRef`), `component`, `type_id`.
+
+### Observers (synchronous)
+
+| Function | Description |
+|----------|-------------|
+| `world.onEntitySpawn(cb)` | Fires when entity spawns |
+| `world.onEntityDestroy(cb)` | Fires when entity destroyed |
+| `world.onComponentAdd(T, cb)` | Fires when component attached |
+| `world.onComponentRemove(T, cb)` | Fires when component detached |
+| `world.onComponentChange(T, cb)` | Fires when component data set |
+| `observe_all` | Wildcard type id for `onComponentAddId` etc. |
+
+### EntityRef
+
+```zig
+pub const EntityRef = extern struct {
+    chunk: u32,
+    id: u32,
+    generation: u32,
+    pub fn toGlobalId(self: EntityRef) u64;
+};
+```
+
+Helper: `entityRefFromGlobalId(gid: u64) EntityRef`
+
 ## Systems
 
 The `Systems` struct provides functionality for running systems in the ECS.
@@ -413,236 +574,114 @@ For more details on SIMD optimizations, see the [Advanced Optimizations](advance
 
 ## C API
 
-Coyote ECS provides a C API for cross-language compatibility.
+Coyote ECS provides a C API for cross-language compatibility. See [c-api-guide.md](c-api-guide.md) for full examples.
 
 ### Types
 
-#### `coyote_world`
-
-A handle to a Coyote ECS world.
-
 ```c
-coyote_world world = coyote_world_create();
+typedef uintptr_t world;
+typedef uintptr_t entity;
+typedef uintptr_t component;
+typedef uintptr_t iterator;
+typedef uint64_t coyote_entity_ref;
+typedef uintptr_t command_buffer;
+typedef uintptr_t scheduler;
+
+typedef struct coyote_type {
+    uintptr_t id;
+    uintptr_t size;
+    uint8_t alignof;
+    const char* name;
+} coyote_type;
+
+#define COYOTE_MAKE_TYPE(TypeId, TypeName) { ... }
 ```
 
-#### `coyote_entity`
-
-A handle to a Coyote ECS entity.
-
-```c
-coyote_entity entity = coyote_entities_create(world);
-```
-
-#### `coyote_component`
-
-A handle to a Coyote ECS component.
-
-```c
-coyote_component component = coyote_components_create(world, type);
-```
-
-#### `coyote_type`
-
-A C type definition for components.
-
-```c
-coyote_type type = {
-    .id = 1,
-    .size = sizeof(MyComponent),
-    .alignof = alignof(MyComponent),
-    .name = "MyComponent"
-};
-```
-
-#### `coyote_iterator`
-
-A handle to a Coyote ECS iterator.
-
-```c
-coyote_iterator iterator = coyote_components_iterator(world);
-```
-
-### Functions
-
-#### World Management
-
-##### `coyote_world_create()`
-
-Creates a new Coyote ECS world.
-
-```c
-coyote_world world = coyote_world_create();
-```
-
-##### `coyote_world_destroy(world)`
-
-Destroys a Coyote ECS world.
-
-```c
-coyote_world_destroy(world);
-```
-
-#### Entity Management
-
-##### `coyote_entities_create(world)`
-
-Creates a new entity.
-
-```c
-coyote_entity entity = coyote_entities_create(world);
-```
-
-##### `coyote_entities_destroy(entity)`
-
-Destroys an entity.
-
-```c
-coyote_entities_destroy(entity);
-```
-
-##### `coyote_entities_count(world)`
-
-Returns the number of entities.
-
-```c
-size_t count = coyote_entities_count(world);
-```
-
-#### Component Management
-
-##### `coyote_components_create(world, type)`
-
-Creates a new component.
-
-```c
-coyote_component component = coyote_components_create(world, type);
-```
-
-##### `coyote_components_destroy(component)`
-
-Destroys a component.
-
-```c
-coyote_components_destroy(component);
-```
-
-##### `coyote_components_count(world)`
-
-Returns the number of components.
-
-```c
-size_t count = coyote_components_count(world);
-```
-
-##### `coyote_components_gc(world)`
-
-Runs garbage collection on components.
-
-```c
-coyote_components_gc(world);
-```
-
-#### Component Attachment
-
-##### `coyote_entity_attach_component(entity, component, data, size)`
-
-Attaches a component to an entity.
-
-```c
-coyote_entity_attach_component(entity, component, &my_component_data, sizeof(MyComponent));
-```
-
-##### `coyote_entity_detach_component(entity, component)`
-
-Detaches a component from an entity.
-
-```c
-coyote_entity_detach_component(entity, component);
-```
-
-#### Iterators
-
-##### `coyote_components_iterator(world)`
-
-Returns an iterator over all components.
-
-```c
-coyote_iterator iterator = coyote_components_iterator(world);
-```
-
-##### `coyote_components_iterator_next(iterator)`
-
-Returns the next component in the iterator.
-
-```c
-coyote_component component = coyote_components_iterator_next(iterator);
-```
-
-##### `coyote_components_iterator_filter(world, type)`
-
-Returns an iterator over components of the specified type.
-
-```c
-coyote_iterator iterator = coyote_components_iterator_filter(world, type);
-```
-
-##### `coyote_components_iterator_filter_next(iterator)`
-
-Returns the next component in the filtered iterator.
-
-```c
-coyote_component component = coyote_components_iterator_filter_next(iterator);
-```
-
-##### `coyote_components_iterator_filter_range(world, type, start_idx, end_idx)`
-
-Returns an iterator over components of the specified type within a range.
-
-```c
-coyote_iterator iterator = coyote_components_iterator_filter_range(world, type, 0, 100);
-```
-
-##### `coyote_components_iterator_filter_range_next(iterator)`
-
-Returns the next component in the range iterator.
-
-```c
-coyote_component component = coyote_components_iterator_filter_range_next(iterator);
-```
-
-##### `coyote_entities_iterator(world)`
-
-Returns an iterator over all entities.
-
-```c
-coyote_iterator iterator = coyote_entities_iterator(world);
-```
-
-##### `coyote_entities_iterator_next(iterator)`
-
-Returns the next entity in the iterator.
-
-```c
-coyote_entity entity = coyote_entities_iterator_next(iterator);
-```
-
-##### `coyote_entities_iterator_filter(world, type)`
-
-Returns an iterator over entities with components of the specified type.
-
-```c
-coyote_iterator iterator = coyote_entities_iterator_filter(world, type);
-```
-
-##### `coyote_entities_iterator_filter_next(iterator)`
-
-Returns the next entity in the filtered iterator.
-
-```c
-coyote_entity entity = coyote_entities_iterator_filter_next(iterator);
-```
-
-For more details on the C API, see the [C API Guide](c-api-guide.md).
+### World and Entity
+
+| Function | Description |
+|----------|-------------|
+| `coyote_world_create()` | Create world |
+| `coyote_world_destroy(world)` | Destroy world |
+| `coyote_entity_create(world)` | Create entity |
+| `coyote_entity_destroy(entity)` | Destroy entity |
+| `coyote_entity_handle(entity)` | Get `coyote_entity_ref` |
+| `coyote_entity_generation(entity)` | Get generation |
+| `coyote_entity_resolve(world, handle)` | Resolve handle to entity |
+| `coyote_entity_is_valid(world, handle)` | Check handle validity |
+| `coyote_entity_has(entity, type)` | Check component ownership |
+| `coyote_entity_get(entity, type)` | Get component data pointer |
+| `coyote_entity_remove(entity, type)` | Remove component type |
+| `coyote_entity_attach(entity, component, type)` | Attach component |
+| `coyote_entity_detach(entity, component)` | Detach component |
+| `coyote_entities_count(world)` | Live entity count |
+
+### Components and Iteration
+
+| Function | Description |
+|----------|-------------|
+| `coyote_component_create(world, type)` | Create component |
+| `coyote_component_destroy(component)` | Destroy component |
+| `coyote_component_get(component)` | Get data pointer |
+| `coyote_component_is(component, type)` | Type check |
+| `coyote_components_count(world)` | Live component count |
+| `coyote_components_gc(world)` | Garbage collect |
+| `coyote_components_iterator_filter(world, type)` | Filter by type |
+| `coyote_components_iterator_filter_next(it)` | Next component |
+| `coyote_entities_iterator_filter(world, type)` | Entities by type |
+| `coyote_entities_iterator_filter_next(it)` | Next entity |
+| `coyote_entities_query(world, include, n, exclude, n)` | Multi-component query |
+| `coyote_entities_query_next(it)` | Next query result |
+
+### Command Buffer
+
+| Function | Description |
+|----------|-------------|
+| `coyote_command_buffer_create(world)` | Create buffer |
+| `coyote_command_buffer_destroy(cb)` | Destroy buffer |
+| `coyote_command_buffer_flush(cb)` | Apply + reset |
+| `coyote_command_buffer_reset(cb)` | Discard without apply |
+| `coyote_cb_spawn(cb)` | Deferred entity placeholder |
+| `coyote_cb_destroy_entity(cb, handle)` | Record destroy |
+| `coyote_cb_attach(cb, handle, component, type)` | Record attach |
+| `coyote_cb_remove(cb, handle, type)` | Record remove |
+| `coyote_cb_*_deferred(...)` | Same for placeholder entities |
+
+### Scheduler
+
+| Function | Description |
+|----------|-------------|
+| `coyote_scheduler_create(world)` | Create scheduler |
+| `coyote_scheduler_destroy(sched)` | Destroy scheduler |
+| `coyote_scheduler_add_stage(sched)` | Add stage, returns index |
+| `coyote_scheduler_add_system(sched, stage, fn, user_data)` | Register system |
+| `coyote_scheduler_run(sched)` | Run all stages |
+
+### Resources
+
+| Function | Description |
+|----------|-------------|
+| `coyote_resource_insert(world, type, data)` | Insert singleton |
+| `coyote_resource_get(world, type)` | Get pointer |
+| `coyote_resource_has(world, type)` | Check existence |
+| `coyote_resource_remove(world, type)` | Remove singleton |
+
+### Events and Observers
+
+| Function | Description |
+|----------|-------------|
+| `coyote_events_count(world)` | Queued event count |
+| `coyote_events_emit(world, type, data)` | Emit custom event |
+| `coyote_events_drain_structural(world, handler, user_data)` | Drain lifecycle |
+| `coyote_events_clear(world)` | Clear queue |
+| `coyote_observer_on_entity_spawn(...)` | Spawn observer |
+| `coyote_observer_on_entity_destroy(...)` | Destroy observer |
+| `coyote_observer_on_component_add(...)` | Add observer |
+| `coyote_observer_on_component_add_any(...)` | Add observer (all types) |
+| `coyote_observer_on_component_remove(...)` | Remove observer |
+| `coyote_observer_on_component_change(...)` | Change observer |
+
+For more details, see the [C API Guide](c-api-guide.md).
 
 ## Utility Functions
 

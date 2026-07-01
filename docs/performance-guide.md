@@ -115,24 +115,25 @@ entity3.destroy();
 Access components only when needed:
 
 ```zig
-// Good: Minimal component access
-pub fn UpdatePosition(world: *World) void {
-    var it = world.entities.iteratorFilter(Components.Position);
-    while(it.next()) |entity| {
-        if(entity.getOneComponent(Components.Velocity)) |velocity| {
-            var pos = entity.getOneComponent(Components.Position).?;
-            pos.x += velocity.x;
-            pos.y += velocity.y;
+// Good: query only entities with both components
+pub fn UpdatePosition(world: *World) !void {
+    var q = world.entities.query(.{ Components.Position, Components.Velocity });
+    while (q.next()) |entity| {
+        if (entity.get(Components.Velocity)) |vel| {
+            if (entity.get(Components.Position)) |pos| {
+                pos.x += vel.x;
+                pos.y += vel.y;
+            }
         }
     }
 }
 
-// Bad: Frequent component access
-pub fn UpdatePosition(world: *World) void {
+// Bad: iterate all entities and probe components
+pub fn UpdatePositionSlow(world: *World) !void {
     var it = world.entities.iterator();
-    while(it.next()) |entity| {
-        if(entity.getOneComponent(Components.Position)) |pos| {
-            if(entity.getOneComponent(Components.Velocity)) |vel| {
+    while (it.next()) |entity| {
+        if (entity.get(Components.Position)) |pos| {
+            if (entity.get(Components.Velocity)) |vel| {
                 pos.x += vel.x;
                 pos.y += vel.y;
             }

@@ -141,20 +141,17 @@ var q2 = world.entities.queryExclude(.{Components.Position}, .{Components.Veloci
 while (q.next()) |entity| { /* ... */ }
 ```
 
-Queries are **archetype-backed**: every live entity belongs to exactly one archetype (the group of entities sharing its component-type signature), and a query matches whole archetypes with two bitmask operations before visiting only the entities inside them. Cost scales with the number of archetypes plus matching entities, not with world size times filter count.
+Queries are **archetype-backed** with **sparse sorted signatures**: each archetype stores a small sorted list of owned type ids (not a fixed-width bitmask), so registered component types are not capped at 32 or 64. Queries test `include ⊆ archetype.types` and `exclude ∩ archetype.types = ∅`.
 
-Structural changes (attach/detach/destroy) move entities between archetypes, which can skip or repeat entities mid-query — defer them with a command buffer while a query is live.
+### Type registry
 
-### Archetypes
+Each world has its own `TypeRegistry` (`world.types`). Type ids are dense `u32` values assigned on first use — there is no global limit on how many distinct types a world can register. Zig types and C `coyote_type` descriptors are tracked separately per world.
 
-The archetype index is maintained automatically:
+```zig
+try std.testing.expectEqual(@as(u32, 80), world.types.count()); // after registering 80 types
+```
 
-- `world.entities.create()` places the entity in the empty (signature-0) archetype
-- `attach` widens the entity's signature and moves it; `detach`/`remove` narrow it once the last component of a type is gone
-- `entity.destroy()` removes the entity from the index
-- Component data stays in chunked storage — archetypes are an index over it, so component pointers remain stable
-
-Introspection: `world.archetypes.count()` returns the number of occupied archetypes, and `entity.signature` is the bitmask of owned type ids.
+Use `world.typeId(MyComponent)` or `typeToId(world, MyComponent)` to resolve ids. `entity.signature()` returns the archetype's sorted type-id list.
 
 ## Command Buffer
 

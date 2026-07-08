@@ -145,7 +145,8 @@ export fn coyote_entity_has(entity_ptr: usize, c_type: coyote.c_type) c_int {
     }
 
     const entity = @as(*coyote.Entity, @ptrFromInt(entity_ptr));
-    return if (entity.hasById(coyote.typeToIdC(c_type))) 1 else 0;
+    const world = @as(*coyote.World, @ptrCast(@alignCast(entity.world)));
+    return if (entity.hasById(world.typeIdC(c_type))) 1 else 0;
 }
 
 export fn coyote_entity_get(entity_ptr: usize, c_type: coyote.c_type) ?*anyopaque {
@@ -155,7 +156,8 @@ export fn coyote_entity_get(entity_ptr: usize, c_type: coyote.c_type) ?*anyopaqu
     }
 
     const entity = @as(*coyote.Entity, @ptrFromInt(entity_ptr));
-    const component = entity.getOneComponentById(coyote.typeToIdC(c_type)) orelse return null;
+    const world = @as(*coyote.World, @ptrCast(@alignCast(entity.world)));
+    const component = entity.getOneComponentById(world.typeIdC(c_type)) orelse return null;
     return component.data;
 }
 
@@ -166,7 +168,8 @@ export fn coyote_entity_remove(entity_ptr: usize, c_type: coyote.c_type) c_int {
     }
 
     const entity = @as(*coyote.Entity, @ptrFromInt(entity_ptr));
-    entity.removeById(coyote.typeToIdC(c_type)) catch return 1;
+    const world = @as(*coyote.World, @ptrCast(@alignCast(entity.world)));
+    entity.removeById(world.typeIdC(c_type)) catch return 1;
     return 0;
 }
 
@@ -203,7 +206,7 @@ export fn coyote_components_iterator_filter(world_ptr: usize, c_type: coyote.c_t
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
     const components = &world._components;
     const iterator = coyote.allocator.create(coyote.SuperComponents.MaskedIterator) catch unreachable;
-    iterator.* = coyote.SuperComponents.MaskedIterator{ .ctx = components, .filter_type = coyote.typeToIdC(c_type), .alive = coyote.CHUNK_SIZE * world.components_len, .world = world };
+    iterator.* = coyote.SuperComponents.MaskedIterator{ .ctx = components, .filter_type = world.typeIdC(c_type), .alive = coyote.CHUNK_SIZE * world.components_len, .world = world };
     return @intFromPtr(iterator);
 }
 
@@ -238,20 +241,16 @@ export fn coyote_entities_query(world_ptr: usize, include: [*c]const coyote.c_ty
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
     const iterator = coyote.allocator.create(coyote.SuperEntities.QueryIterator) catch unreachable;
 
-    var include_mask: coyote.Signature = 0;
-    var exclude_mask: coyote.Signature = 0;
+    var include_ids = coyote.allocator.alloc(u32, include_n) catch unreachable;
+    var exclude_ids = coyote.allocator.alloc(u32, exclude_n) catch unreachable;
     var i: usize = 0;
-    while (i < include_n) : (i += 1)
-        include_mask |= coyote.signatureBit(coyote.typeToIdC(include[i]));
+    while (i < include_n) : (i += 1) include_ids[i] = world.typeIdC(include[i]);
     i = 0;
-    while (i < exclude_n) : (i += 1)
-        exclude_mask |= coyote.signatureBit(coyote.typeToIdC(exclude[i]));
+    while (i < exclude_n) : (i += 1) exclude_ids[i] = world.typeIdC(exclude[i]);
 
-    iterator.* = coyote.SuperEntities.QueryIterator{
-        .world = world,
-        .include_mask = include_mask,
-        .exclude_mask = exclude_mask,
-    };
+    iterator.* = world.entities.queryC(coyote.allocator, include_ids, exclude_ids) catch unreachable;
+    coyote.allocator.free(include_ids);
+    coyote.allocator.free(exclude_ids);
 
     return @intFromPtr(iterator);
 }
@@ -263,9 +262,27 @@ export fn coyote_archetypes_count(world_ptr: usize) c_int {
     return @as(c_int, @intCast(world.archetypes.count()));
 }
 
-//Signature (component-type bitmask) of a live entity, for diagnostics.
+//Registered component/resource types in this world.
+export fn coyote_types_count(world_ptr: usize) c_int {
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    return @as(c_int, @intCast(world.types.count()));
+}
+
+//Hash fingerprint of a live entity's sparse signature (diagnostics).
 export fn coyote_entity_signature(entity: *coyote.Entity) u32 {
-    return entity.signature;
+    return @truncate(entity.signature().hash());
+}
+
+//Number of distinct component types owned by the entity.
+export fn coyote_entity_type_count(entity: *coyote.Entity) u32 {
+    return @intCast(entity.signature().ids.items.len);
+}
+
+//Type id at sorted-signature index `index`, or maxInt if out of range.
+export fn coyote_entity_type_at(entity: *coyote.Entity, index: u32) u32 {
+    const sig = entity.signature();
+    if (index >= sig.ids.items.len) return std.math.maxInt(u32);
+    return sig.ids.items[index];
 }
 
 export fn coyote_entities_query_next(iterator_ptr: usize) usize {
@@ -273,6 +290,7 @@ export fn coyote_entities_query_next(iterator_ptr: usize) usize {
     if (iterator.next()) |entity| {
         return @intFromPtr(entity);
     } else {
+        iterator.deinit(coyote.allocator);
         coyote.allocator.destroy(iterator);
         return 0;
     }
@@ -282,7 +300,7 @@ export fn coyote_entities_iterator_filter(world_ptr: usize, c_type: coyote.c_typ
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
     const entities = &world._entities;
     const iterator = coyote.allocator.create(coyote.SuperEntities.MaskedIterator) catch unreachable;
-    iterator.* = coyote.SuperEntities.MaskedIterator{ .ctx = entities, .filter_type = coyote.typeToIdC(c_type), .alive = coyote.CHUNK_SIZE * world.components_len, .world = world };
+    iterator.* = coyote.SuperEntities.MaskedIterator{ .ctx = entities, .filter_type = world.typeIdC(c_type), .alive = coyote.CHUNK_SIZE * world.components_len, .world = world };
     return @intFromPtr(iterator);
 }
 
@@ -297,7 +315,8 @@ export fn coyote_entities_iterator_filter_next(iterator_ptr: usize) usize {
 }
 
 export fn coyote_component_is(component: *coyote.Component, c_type: coyote.c_type) usize {
-    if (component.typeId.? == c_type.id) {
+    const world = @as(*coyote.World, @ptrCast(@alignCast(component.world)));
+    if (component.typeId.? == world.typeIdC(c_type)) {
         return 1;
     } else {
         return 0;
@@ -318,7 +337,7 @@ export fn coyote_components_iterator_filter_range(world_ptr: usize, c_type: coyo
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
     const components = &world._components;
     const iterator = coyote.allocator.create(coyote.SuperComponents.MaskedRangeIterator) catch unreachable;
-    iterator.* = coyote.SuperComponents.MaskedRangeIterator{ .ctx = components, .filter_type = coyote.typeToIdC(c_type), .index = start_idx, .start_index = start_idx, .end_index = end_idx, .world = world };
+    iterator.* = coyote.SuperComponents.MaskedRangeIterator{ .ctx = components, .filter_type = world.typeIdC(c_type), .index = start_idx, .start_index = start_idx, .end_index = end_idx, .world = world };
     return @intFromPtr(iterator);
 }
 
@@ -403,13 +422,13 @@ export fn coyote_cb_attach_deferred(cb_ptr: usize, placeholder: u32, component_p
 export fn coyote_cb_remove(cb_ptr: usize, handle: u64, c_type: coyote.c_type) c_int {
     if (cb_ptr == 0) return 1;
     const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
-    return if (cb.cRemoveExisting(handle, coyote.typeToIdC(c_type))) 0 else 1;
+    return if (cb.cRemoveExisting(handle, cb.world.typeIdC(c_type))) 0 else 1;
 }
 
 export fn coyote_cb_remove_deferred(cb_ptr: usize, placeholder: u32, c_type: coyote.c_type) c_int {
     if (cb_ptr == 0) return 1;
     const cb = @as(*coyote.CommandBuffer, @ptrFromInt(cb_ptr));
-    return if (cb.cRemoveDeferred(placeholder, coyote.typeToIdC(c_type))) 0 else 1;
+    return if (cb.cRemoveDeferred(placeholder, cb.world.typeIdC(c_type))) 0 else 1;
 }
 
 // --- Scheduler: ordered, staged system runner ---
@@ -458,26 +477,26 @@ export fn coyote_scheduler_run(sched_ptr: usize) c_int {
 export fn coyote_resource_insert(world_ptr: usize, c_type: coyote.c_type, data: *const anyopaque) c_int {
     if (world_ptr == 0 or @intFromPtr(data) == 0) return 1;
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
-    world.resources.cInsert(world.allocator, c_type, data) catch return 1;
+    world.resources.cInsert(world, c_type, data) catch return 1;
     return 0;
 }
 
 export fn coyote_resource_get(world_ptr: usize, c_type: coyote.c_type) ?*anyopaque {
     if (world_ptr == 0) return null;
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
-    return world.resources.cGet(c_type);
+    return world.resources.cGet(world, c_type);
 }
 
 export fn coyote_resource_has(world_ptr: usize, c_type: coyote.c_type) c_int {
     if (world_ptr == 0) return 0;
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
-    return if (world.resources.cContains(c_type)) 1 else 0;
+    return if (world.resources.cContains(world, c_type)) 1 else 0;
 }
 
 export fn coyote_resource_remove(world_ptr: usize, c_type: coyote.c_type) void {
     if (world_ptr == 0) return;
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
-    world.resources.cRemove(world.allocator, c_type);
+    world.resources.cRemove(world, c_type);
 }
 
 // --- Events and observers ---
@@ -491,7 +510,7 @@ export fn coyote_events_count(world_ptr: usize) c_int {
 export fn coyote_events_emit(world_ptr: usize, c_type: coyote.c_type, data: *const anyopaque) c_int {
     if (world_ptr == 0 or @intFromPtr(data) == 0) return 1;
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
-    world.events.cEmit(world.allocator, c_type, data) catch return 1;
+    world.events.cEmit(world, c_type, data) catch return 1;
     return 0;
 }
 
@@ -548,7 +567,7 @@ export fn coyote_observer_on_component_add(
 ) c_int {
     if (world_ptr == 0) return 1;
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
-    world.observers.cOnComponentAdd(world.allocator, coyote.typeToIdC(c_type), cb, user_data) catch return 1;
+    world.observers.cOnComponentAdd(world.allocator, world.typeIdC(c_type), cb, user_data) catch return 1;
     return 0;
 }
 
@@ -571,7 +590,7 @@ export fn coyote_observer_on_component_remove(
 ) c_int {
     if (world_ptr == 0) return 1;
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
-    world.observers.cOnComponentRemove(world.allocator, coyote.typeToIdC(c_type), cb, user_data) catch return 1;
+    world.observers.cOnComponentRemove(world.allocator, world.typeIdC(c_type), cb, user_data) catch return 1;
     return 0;
 }
 
@@ -583,6 +602,6 @@ export fn coyote_observer_on_component_change(
 ) c_int {
     if (world_ptr == 0) return 1;
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
-    world.observers.cOnComponentChange(world.allocator, coyote.typeToIdC(c_type), cb, user_data) catch return 1;
+    world.observers.cOnComponentChange(world.allocator, world.typeIdC(c_type), cb, user_data) catch return 1;
     return 0;
 }

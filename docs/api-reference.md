@@ -633,7 +633,10 @@ typedef struct coyote_type {
 | `coyote_entities_query(world, include, n, exclude, n)` | Multi-component query (archetype-backed) |
 | `coyote_entities_query_next(it)` | Next query result |
 | `coyote_archetypes_count(world)` | Occupied archetype count |
-| `coyote_entity_signature(entity)` | Component-type bitmask of an entity |
+| `coyote_types_count(world)` | Registered type count in world |
+| `coyote_entity_signature(entity)` | Signature hash fingerprint |
+| `coyote_entity_type_count(entity)` | Owned type count |
+| `coyote_entity_type_at(entity, i)` | Type id at sorted index |
 
 ### Command Buffer
 
@@ -703,21 +706,33 @@ Casts component data to a specific type.
 const typed_data = CastData(MyComponent, component.data);
 ```
 
-### `typeToId(comptime T: type) u32`
+### `typeToId(world: *World, comptime T: type) u32`
 
-Converts a type to an ID.
-
-```zig
-const id = typeToId(MyComponent);
-```
-
-### `typeToIdC(comp_type: c_type) u32`
-
-Converts a C type to an ID.
+Registers `T` in the world's type registry (if needed) and returns its dense id.
 
 ```zig
-const id = typeToIdC(my_c_type);
+const id = typeToId(world, MyComponent);
 ```
+
+### `typeToIdC(world: *World, ct: c_type) u32`
+
+Registers a C component type in the world's registry.
+
+```zig
+const id = typeToIdC(world, my_c_type);
+```
+
+### `world.typeId(T)` / `world.typeIdC(ct)`
+
+Preferred shorthand on `World`.
+
+### `entity.signature() *const TypeSignature`
+
+Sorted list of owned component type ids (via archetype).
+
+### `world.types.count() u32`
+
+Number of registered types in this world.
 
 ### `opaqueDestroy(self: std.mem.Allocator, ptr: anytype, sz: usize, alignment: u8) void`
 

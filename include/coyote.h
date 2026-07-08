@@ -53,9 +53,12 @@ iterator coyote_components_iterator_filter_range(world world, coyote_type type, 
 component coyote_components_iterator_filter_range_next(iterator iterator);
 iterator coyote_entities_query(world world, const coyote_type* include, size_t include_n, const coyote_type* exclude, size_t exclude_n);
 entity coyote_entities_query_next(iterator iterator);
-// Archetype introspection: entities are grouped by component-type signature.
-int coyote_archetypes_count(world world);          // archetypes with >=1 live entity
-uint32_t coyote_entity_signature(entity entity);   // bitmask of owned type ids
+// Archetype / type registry introspection
+int coyote_archetypes_count(world world);
+int coyote_types_count(world world);
+uint32_t coyote_entity_signature(entity entity);   // hash fingerprint of sparse signature
+uint32_t coyote_entity_type_count(entity entity);  // number of owned component types
+uint32_t coyote_entity_type_at(entity entity, uint32_t index); // sorted type id at index
 void coyote_components_gc(world world);
 int coyote_components_count(world world);
 int coyote_entities_count(world world);

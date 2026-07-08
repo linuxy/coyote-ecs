@@ -1,23 +1,134 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const MAX_COMPONENTS = 32; //Maximum number of component types; must fit in Signature's bit width
 pub const CHUNK_SIZE = 128; //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
 
-//One bit per registered component type. An entity's signature is the set of
-//types it currently owns; entities sharing a signature live in one archetype.
-pub const Signature = u32;
-
-comptime {
-    std.debug.assert(MAX_COMPONENTS <= @bitSizeOf(Signature));
-}
-
-pub inline fn signatureBit(tid: u32) Signature {
-    return @as(Signature, 1) << @intCast(tid);
-}
-
 pub const allocator = std.heap.c_allocator;
+
+//Per-world component/resource type registry. Type ids are dense u32 indices
+//assigned on first use; there is no fixed upper bound on registered types.
+pub const TypeRegistry = struct {
+    const Entry = struct {
+        key: usize,
+        size: usize,
+        alignment: u8,
+    };
+
+    entries: std.ArrayListUnmanaged(Entry) = .empty,
+    zig_lookup: std.HashMapUnmanaged(usize, u32, std.hash_map.AutoContext(usize), 80) = .{},
+    c_lookup: std.HashMapUnmanaged(usize, u32, std.hash_map.AutoContext(usize), 80) = .{},
+
+    pub fn deinit(self: *TypeRegistry, alloc: std.mem.Allocator) void {
+        self.entries.deinit(alloc);
+        self.zig_lookup.deinit(alloc);
+        self.c_lookup.deinit(alloc);
+    }
+
+    pub fn registerZig(self: *TypeRegistry, alloc: std.mem.Allocator, comptime T: type) !u32 {
+        const key = @intFromPtr(@typeName(T).ptr);
+        if (self.zig_lookup.get(key)) |id| return id;
+        const id: u32 = @intCast(self.entries.items.len);
+        try self.entries.append(alloc, .{ .key = key, .size = @sizeOf(T), .alignment = @alignOf(T) });
+        try self.zig_lookup.put(alloc, key, id);
+        return id;
+    }
+
+    pub fn registerC(self: *TypeRegistry, alloc: std.mem.Allocator, ct: c_type) !u32 {
+        const key = ct.id;
+        if (self.c_lookup.get(key)) |id| return id;
+        const id: u32 = @intCast(self.entries.items.len);
+        try self.entries.append(alloc, .{ .key = key, .size = ct.size, .alignment = ct.alignof });
+        try self.c_lookup.put(alloc, key, id);
+        return id;
+    }
+
+    pub fn sizeOf(self: *const TypeRegistry, id: u32) usize {
+        return self.entries.items[@intCast(id)].size;
+    }
+
+    pub fn alignOf(self: *const TypeRegistry, id: u32) u8 {
+        return self.entries.items[@intCast(id)].alignment;
+    }
+
+    pub fn count(self: *const TypeRegistry) u32 {
+        return @intCast(self.entries.items.len);
+    }
+};
+
+//Sorted, deduplicated list of component type ids owned by an entity/archetype.
+//Archetype queries test include/exclude against these small lists instead of
+//fixed-width bitmasks, so registered types are not capped by machine word size.
+pub const TypeSignature = struct {
+    ids: std.ArrayListUnmanaged(u32) = .empty,
+
+    pub fn deinit(self: *TypeSignature, alloc: std.mem.Allocator) void {
+        self.ids.deinit(alloc);
+    }
+
+    pub fn clone(self: *const TypeSignature, alloc: std.mem.Allocator) !TypeSignature {
+        var out: TypeSignature = .{};
+        try out.ids.appendSlice(alloc, self.ids.items);
+        return out;
+    }
+
+    pub fn eql(self: TypeSignature, other: TypeSignature) bool {
+        return std.mem.eql(u32, self.ids.items, other.ids.items);
+    }
+
+    pub fn hash(self: TypeSignature) u64 {
+        var h: u64 = self.ids.items.len;
+        for (self.ids.items) |id| {
+            h = std.hash.Wyhash.hash(h, std.mem.asBytes(&id));
+        }
+        return h;
+    }
+
+    pub fn contains(self: *const TypeSignature, tid: u32) bool {
+        for (self.ids.items) |id| {
+            if (id == tid) return true;
+        }
+        return false;
+    }
+
+    pub fn matches(self: *const TypeSignature, include: []const u32, exclude: []const u32) bool {
+        for (include) |tid| {
+            if (!self.contains(tid)) return false;
+        }
+        for (exclude) |tid| {
+            if (self.contains(tid)) return false;
+        }
+        return true;
+    }
+
+    pub fn add(self: *TypeSignature, alloc: std.mem.Allocator, tid: u32) !void {
+        if (self.contains(tid)) return;
+        try self.ids.append(alloc, tid);
+        std.mem.sort(u32, self.ids.items, {}, std.sort.asc(u32));
+    }
+
+    pub fn remove(self: *TypeSignature, tid: u32) void {
+        for (self.ids.items, 0..) |id, i| {
+            if (id == tid) {
+                _ = self.ids.swapRemove(i);
+                return;
+            }
+        }
+    }
+
+    //Builds the sorted type-id set from an entity's owned-component reverse index.
+    pub fn fromEntity(alloc: std.mem.Allocator, entity: *const Entity) !TypeSignature {
+        var sig: TypeSignature = .{};
+        errdefer sig.deinit(alloc);
+        var k: u32 = 0;
+        while (k < entity.owned.len) : (k += 1) {
+            const component = entity.owned.at(k);
+            if (!component.alive) continue;
+            if (component.typeId) |tid| try sig.add(alloc, tid);
+        }
+        return sig;
+    }
+};
 
 //No chunk should know of another chunk
 //Modulo ID/CHUNK
@@ -206,79 +317,18 @@ pub const SuperComponents = struct {
     };
 
     pub const MaskedEntityIterator = struct {
-        ctx: *[]_Components,
-        inner_index: usize = 0,
-        outer_index: usize = 0,
         filter_type: u32,
-        entities_alive: usize = 0,
-        components_alive: usize = 0,
-        world: *World,
         entity: *Entity,
+        index: u32 = 0,
 
         pub inline fn next(it: *MaskedEntityIterator) ?*Component {
-            const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
-
-            while (it.outer_index < it.components_alive) {
-                // Process vector_width components at a time
-                const remaining = it.components_alive - it.outer_index;
-                const batch_size = @min(vector_width, remaining);
-
-                // Prepare vectors for parallel processing
-                var owner_checks: @Vector(vector_width, bool) = @splat(false);
-                var component_indices: @Vector(vector_width, u32) = @splat(0);
-
-                // Fill vectors with component data
-                inline for (0..vector_width) |i| {
-                    if (i < batch_size) {
-                        const idx = it.outer_index + i;
-                        const rem = @rem(idx, CHUNK_SIZE);
-                        const mod = idx / CHUNK_SIZE;
-                        component_indices[i] = @intCast(rem);
-                        //owner_checks[i] = it.world._entities[idx].component_mask[it.filter_type].isSet(it.entity.id);
-                        owner_checks[i] = it.world._components[mod].sparse[rem].owners.contains(entityGlobalId(it.entity));
-                    }
+            while (it.index < it.entity.owned.len) : (it.index += 1) {
+                const component = it.entity.owned.at(it.index);
+                if (!component.alive) continue;
+                if (component.typeId) |tid| {
+                    if (tid == it.filter_type) return component;
                 }
-
-                // Process components that are owned by the entity
-                inline for (0..vector_width) |i| {
-                    if (i < batch_size and owner_checks[i]) {
-                        const mod = (it.outer_index + i) / CHUNK_SIZE;
-                        const rem = component_indices[i];
-
-                        // Use SIMD for entity chunk processing
-                        const entities_per_vector = std.simd.suggestVectorLength(u32) orelse 4;
-                        var entity_idx: usize = 0;
-
-                        while (entity_idx + entities_per_vector <= it.world.entities_len) : (entity_idx += entities_per_vector) {
-                            var entity_checks: @Vector(entities_per_vector, bool) = undefined;
-
-                            // Check multiple entities in parallel
-                            inline for (0..entities_per_vector) |j| {
-                                entity_checks[j] = it.world._entities[entity_idx + j].component_mask[it.filter_type].isSet(it.world._components[mod].sparse[@intCast(rem)].id);
-                            }
-
-                            // If any entity has this component
-                            inline for (0..entities_per_vector) |j| {
-                                if (entity_checks[j]) {
-                                    it.outer_index += i + 1;
-                                    return &it.ctx.*[mod].sparse[@intCast(rem)];
-                                }
-                            }
-                        }
-
-                        // Handle remaining entities
-                        while (entity_idx < it.world.entities_len) : (entity_idx += 1) {
-                            if (it.world._entities[entity_idx].component_mask[it.filter_type].isSet(it.world._components[mod].sparse[@intCast(rem)].id)) {
-                                it.outer_index += i + 1;
-                                return &it.ctx.*[mod].sparse[@intCast(rem)];
-                            }
-                        }
-                    }
-                }
-
-                it.outer_index += batch_size;
             }
-
             return null;
         }
     };
@@ -291,28 +341,24 @@ pub const SuperComponents = struct {
     }
 
     pub fn iteratorFilter(ctx: *SuperComponents, comptime comp_type: type) SuperComponents.MaskedIterator {
-        //get an iterator for components attached to this entity
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const components = &world._components;
-        return .{ .ctx = components, .filter_type = typeToId(comp_type), .alive = CHUNK_SIZE * world.components_len, .world = world };
+        return .{ .ctx = components, .filter_type = world.typeId(comp_type), .alive = CHUNK_SIZE * world.components_len, .world = world };
     }
 
     pub fn iteratorFilterRange(ctx: *SuperComponents, comptime comp_type: type, start_idx: usize, end_idx: usize) SuperComponents.MaskedRangeIterator {
-        //get an iterator for components attached to this entity within a specific range
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const components = &world._components;
-        return .{ .ctx = components, .filter_type = typeToId(comp_type), .index = start_idx, .start_index = start_idx, .end_index = end_idx, .world = world };
+        return .{ .ctx = components, .filter_type = world.typeId(comp_type), .index = start_idx, .start_index = start_idx, .end_index = end_idx, .world = world };
     }
 
     pub fn iteratorFilterByEntity(ctx: *SuperComponents, entity: *Entity, comptime comp_type: type) SuperComponents.MaskedEntityIterator {
-        return ctx.iteratorFilterByEntityType(entity, typeToId(comp_type));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return ctx.iteratorFilterByEntityType(entity, world.typeId(comp_type));
     }
 
-    pub fn iteratorFilterByEntityType(ctx: *SuperComponents, entity: *Entity, filter_type: u32) SuperComponents.MaskedEntityIterator {
-        //get an iterator for components of a given type id attached to this entity
-        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        const components = &world._components;
-        return .{ .ctx = components, .filter_type = filter_type, .components_alive = ctx.alive, .entities_alive = world.entities.alive, .world = world, .entity = entity };
+    pub fn iteratorFilterByEntityType(_: *SuperComponents, entity: *Entity, filter_type: u32) SuperComponents.MaskedEntityIterator {
+        return .{ .filter_type = filter_type, .entity = entity };
     }
 };
 
@@ -330,6 +376,8 @@ pub const _Components = struct {
     }
 
     pub fn processComponentsSimd(ctx: *_Components, comptime comp_type: type, processor: fn (*comp_type) void) void {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const filter_id = world.typeId(comp_type);
         const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
         var i: usize = 0;
 
@@ -346,7 +394,7 @@ pub const _Components = struct {
             // Process multiple components in parallel
             inline for (0..vector_width) |j| {
                 const component = &ctx.sparse[@intCast(rems[j])];
-                if (component.alive and component.typeId == typeToId(comp_type)) {
+                if (component.alive and component.typeId == filter_id) {
                     if (component.data) |data| {
                         const typed_data = CastData(comp_type, data);
                         processor(typed_data);
@@ -359,7 +407,7 @@ pub const _Components = struct {
         while (i < ctx.alive) : (i += 1) {
             const rem = @rem(i, CHUNK_SIZE);
             const component = &ctx.sparse[rem];
-            if (component.alive and component.typeId == typeToId(comp_type)) {
+            if (component.alive and component.typeId == filter_id) {
                 if (component.data) |data| {
                     const typed_data = CastData(comp_type, data);
                     processor(typed_data);
@@ -369,6 +417,8 @@ pub const _Components = struct {
     }
 
     pub fn processComponentsRangeSimd(ctx: *_Components, comptime comp_type: type, start_idx: usize, end_idx: usize, processor: fn (*comp_type) void) void {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const filter_id = world.typeId(comp_type);
         const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
         var i: usize = start_idx;
 
@@ -385,7 +435,7 @@ pub const _Components = struct {
             // Process multiple components in parallel
             inline for (0..vector_width) |j| {
                 const component = &ctx.sparse[@intCast(rems[j])];
-                if (component.alive and component.typeId == typeToId(comp_type)) {
+                if (component.alive and component.typeId == filter_id) {
                     if (component.data) |data| {
                         const typed_data = CastData(comp_type, data);
                         processor(typed_data);
@@ -398,7 +448,7 @@ pub const _Components = struct {
         while (i < end_idx) : (i += 1) {
             const rem = @rem(i, CHUNK_SIZE);
             const component = &ctx.sparse[rem];
-            if (component.alive and component.typeId == typeToId(comp_type)) {
+            if (component.alive and component.typeId == filter_id) {
                 if (component.data) |data| {
                     const typed_data = CastData(comp_type, data);
                     processor(typed_data);
@@ -439,7 +489,7 @@ pub const _Components = struct {
         component.world = world;
         component.attached = false;
         component.magic = MAGIC;
-        component.typeId = typeToId(comp_type);
+        component.typeId = world.typeId(comp_type);
         component.id = ctx.free_idx;
         component.alive = true;
         component.owners = .{};
@@ -455,9 +505,6 @@ pub const _Components = struct {
         if (!wrapped) {
             ctx.len += 1;
         }
-
-        if (typeToId(comp_type) >= MAX_COMPONENTS)
-            return error.ComponentNotInContainer;
 
         return component;
     }
@@ -494,7 +541,7 @@ pub const _Components = struct {
         component.world = world;
         component.attached = false;
         component.magic = MAGIC;
-        component.typeId = typeToIdC(comp_type);
+        component.typeId = world.typeIdC(comp_type);
         component.id = ctx.free_idx;
         component.alive = true;
         component.owners = .{};
@@ -511,18 +558,9 @@ pub const _Components = struct {
             ctx.len += 1;
         }
 
-        if (typeToIdC(comp_type) >= MAX_COMPONENTS)
-            return error.ComponentNotInContainer;
-
         return component;
     }
 };
-
-//Global
-var types: [MAX_COMPONENTS]usize = undefined;
-var types_size: [MAX_COMPONENTS]usize = undefined;
-var types_align: [MAX_COMPONENTS]u8 = undefined;
-var type_idx: usize = 0;
 
 //TLS
 var entities_idx: usize = 0;
@@ -550,103 +588,91 @@ pub const Resources = struct {
         self.store.deinit(alloc);
     }
 
-    pub fn insert(self: *Resources, alloc: std.mem.Allocator, comptime T: type, value: T) !void {
-        const id = typeToId(T);
+    pub fn insert(self: *Resources, world: *World, comptime T: type, value: T) !void {
+        const id = world.typeId(T);
         if (self.store.get(id)) |existing| {
-            opaqueDestroy(alloc, existing.ptr, existing.size, existing.alignment);
+            opaqueDestroy(world.allocator, existing.ptr, existing.size, existing.alignment);
             _ = self.store.remove(id);
         }
-        const ptr = try alloc.create(T);
+        const ptr = try world.allocator.create(T);
         ptr.* = value;
-        try self.store.put(alloc, id, .{
+        try self.store.put(world.allocator, id, .{
             .ptr = ptr,
             .size = @sizeOf(T),
             .alignment = @alignOf(T),
         });
     }
 
-    pub fn get(self: *Resources, comptime T: type) ?*T {
-        const id = typeToId(T);
+    pub fn get(self: *Resources, world: *World, comptime T: type) ?*T {
+        const id = world.typeId(T);
         const entry = self.store.get(id) orelse return null;
         return @ptrCast(@alignCast(entry.ptr));
     }
 
-    pub inline fn contains(self: *Resources, comptime T: type) bool {
-        return self.get(T) != null;
+    pub inline fn contains(self: *Resources, world: *World, comptime T: type) bool {
+        return self.get(world, T) != null;
     }
 
-    pub fn remove(self: *Resources, alloc: std.mem.Allocator, comptime T: type) void {
-        const id = typeToId(T);
+    pub fn remove(self: *Resources, world: *World, comptime T: type) void {
+        const id = world.typeId(T);
         if (self.store.fetchRemove(id)) |kv| {
-            opaqueDestroy(alloc, kv.value.ptr, kv.value.size, kv.value.alignment);
+            opaqueDestroy(world.allocator, kv.value.ptr, kv.value.size, kv.value.alignment);
         }
     }
 
-    pub fn cInsert(self: *Resources, alloc: std.mem.Allocator, ct: c_type, data: *const anyopaque) !void {
-        const id = typeToIdC(ct);
-        const size = types_size[@intCast(id)];
-        const align_val = types_align[@intCast(id)];
+    pub fn cInsert(self: *Resources, world: *World, ct: c_type, data: *const anyopaque) !void {
+        const id = world.typeIdC(ct);
+        const size = world.types.sizeOf(id);
+        const align_val = world.types.alignOf(id);
 
         if (self.store.get(id)) |existing| {
-            opaqueDestroy(alloc, existing.ptr, existing.size, existing.alignment);
+            opaqueDestroy(world.allocator, existing.ptr, existing.size, existing.alignment);
             _ = self.store.remove(id);
         }
 
-        const mem = alloc.rawAlloc(size, .fromByteUnits(align_val), @returnAddress()) orelse return error.OutOfMemory;
+        const mem = world.allocator.rawAlloc(size, .fromByteUnits(align_val), @returnAddress()) orelse return error.OutOfMemory;
         @memcpy(mem[0..size], @as([*]const u8, @ptrCast(data))[0..size]);
-        try self.store.put(alloc, id, .{ .ptr = mem, .size = size, .alignment = align_val });
+        try self.store.put(world.allocator, id, .{ .ptr = mem, .size = size, .alignment = align_val });
     }
 
-    pub fn cGet(self: *Resources, ct: c_type) ?*anyopaque {
-        const id = typeToIdC(ct);
+    pub fn cGet(self: *Resources, world: *World, ct: c_type) ?*anyopaque {
+        const id = world.typeIdC(ct);
         const entry = self.store.get(id) orelse return null;
         return entry.ptr;
     }
 
-    pub fn cContains(self: *Resources, ct: c_type) bool {
-        const id = typeToIdC(ct);
+    pub fn cContains(self: *Resources, world: *World, ct: c_type) bool {
+        const id = world.typeIdC(ct);
         return self.store.contains(id);
     }
 
-    pub fn cRemove(self: *Resources, alloc: std.mem.Allocator, ct: c_type) void {
-        const id = typeToIdC(ct);
+    pub fn cRemove(self: *Resources, world: *World, ct: c_type) void {
+        const id = world.typeIdC(ct);
         if (self.store.fetchRemove(id)) |kv| {
-            opaqueDestroy(alloc, kv.value.ptr, kv.value.size, kv.value.alignment);
+            opaqueDestroy(world.allocator, kv.value.ptr, kv.value.size, kv.value.alignment);
         }
     }
 };
 
-//Archetype index: groups live entities by their component-type signature.
-//
-//Every live entity belongs to exactly one archetype (the one matching its
-//signature; component-less entities live in the signature-0 archetype). The
-//index is maintained incrementally on attach/detach/destroy, so queries can
-//test a handful of archetype signatures with two mask operations instead of
-//probing every entity for every filter type.
-//
-//Entities are stored as generation-tagged global ids in a dense list per
-//archetype, with swap-remove + row fix-up for O(1) removal. Component data
-//itself stays in the existing chunked storage; this is an index over it, not
-//a table storage rewrite, so component pointers remain stable.
+//Archetype index: groups live entities by their sparse component-type signature.
 pub const Archetypes = struct {
     pub const nil: u32 = std.math.maxInt(u32);
 
     pub const Archetype = struct {
-        signature: Signature = 0,
+        signature: TypeSignature,
         entities: std.ArrayListUnmanaged(u64) = .empty, //generation-tagged gids
     };
 
-    map: std.AutoHashMapUnmanaged(Signature, u32) = .empty,
     list: std.ArrayListUnmanaged(Archetype) = .empty,
 
     pub fn deinit(self: *Archetypes, alloc: std.mem.Allocator) void {
-        for (self.list.items) |*a| a.entities.deinit(alloc);
+        for (self.list.items) |*a| {
+            a.signature.deinit(alloc);
+            a.entities.deinit(alloc);
+        }
         self.list.deinit(alloc);
-        self.map.deinit(alloc);
     }
 
-    //Number of archetypes currently holding at least one entity. Empty
-    //archetypes are kept (signatures recur), so this filters them out.
     pub fn count(self: *const Archetypes) usize {
         var n: usize = 0;
         for (self.list.items) |a| {
@@ -655,28 +681,28 @@ pub const Archetypes = struct {
         return n;
     }
 
-    fn indexFor(self: *Archetypes, alloc: std.mem.Allocator, sig: Signature) !u32 {
-        const gop = try self.map.getOrPut(alloc, sig);
-        if (!gop.found_existing) {
-            gop.value_ptr.* = @intCast(self.list.items.len);
-            errdefer _ = self.map.remove(sig);
-            try self.list.append(alloc, .{ .signature = sig });
+    fn findIndex(self: *const Archetypes, sig: *const TypeSignature) ?u32 {
+        for (self.list.items, 0..) |*arch, i| {
+            if (arch.signature.eql(sig.*)) return @intCast(i);
         }
-        return gop.value_ptr.*;
+        return null;
     }
 
-    //Places `entity` in the archetype for `sig` and records its position.
-    pub fn insert(self: *Archetypes, alloc: std.mem.Allocator, entity: *Entity, sig: Signature) !void {
+    fn indexFor(self: *Archetypes, alloc: std.mem.Allocator, sig: *const TypeSignature) !u32 {
+        if (self.findIndex(sig)) |idx| return idx;
+        const idx: u32 = @intCast(self.list.items.len);
+        try self.list.append(alloc, .{ .signature = try sig.clone(alloc), .entities = .empty });
+        return idx;
+    }
+
+    pub fn insert(self: *Archetypes, alloc: std.mem.Allocator, entity: *Entity, sig: *const TypeSignature) !void {
         const idx = try self.indexFor(alloc, sig);
         const arch = &self.list.items[idx];
         try arch.entities.append(alloc, entityGlobalId(entity));
-        entity.signature = sig;
         entity.archetype = idx;
         entity.archetype_row = @intCast(arch.entities.items.len - 1);
     }
 
-    //Removes `entity` from its archetype (swap-remove; the entity swapped into
-    //the vacated row gets its row index fixed up).
     pub fn remove(self: *Archetypes, world: *World, entity: *Entity) void {
         if (entity.archetype == nil) return;
         const arch = &self.list.items[entity.archetype];
@@ -689,9 +715,11 @@ pub const Archetypes = struct {
         entity.archetype = nil;
     }
 
-    //Moves `entity` to the archetype for `new_sig` (no-op if already there).
-    pub fn move(self: *Archetypes, alloc: std.mem.Allocator, world: *World, entity: *Entity, new_sig: Signature) !void {
-        if (entity.archetype != nil and entity.signature == new_sig) return;
+    pub fn move(self: *Archetypes, alloc: std.mem.Allocator, world: *World, entity: *Entity, new_sig: *const TypeSignature) !void {
+        if (entity.archetype != nil) {
+            const cur = &self.list.items[entity.archetype].signature;
+            if (cur.eql(new_sig.*)) return;
+        }
         self.remove(world, entity);
         try self.insert(alloc, entity, new_sig);
     }
@@ -749,19 +777,19 @@ pub const Events = struct {
     }
 
     //Records a typed custom event. Payload is copied into the events arena.
-    pub fn emit(self: *Events, alloc: std.mem.Allocator, comptime T: type, value: T) !void {
+    pub fn emit(self: *Events, world: *World, comptime T: type, value: T) !void {
         const box = try self.arena.allocator().create(T);
         box.* = value;
-        try self.custom.append(alloc, .{ .type_id = typeToId(T), .data = box });
+        try self.custom.append(world.allocator, .{ .type_id = world.typeId(T), .data = box });
     }
 
-    pub fn cEmit(self: *Events, alloc: std.mem.Allocator, ct: c_type, data: *const anyopaque) !void {
-        const id = typeToIdC(ct);
-        const size = types_size[@intCast(id)];
-        const align_val = types_align[@intCast(id)];
+    pub fn cEmit(self: *Events, world: *World, ct: c_type, data: *const anyopaque) !void {
+        const id = world.typeIdC(ct);
+        const size = world.types.sizeOf(id);
+        const align_val = world.types.alignOf(id);
         const mem = self.arena.allocator().rawAlloc(size, .fromByteUnits(align_val), @returnAddress()) orelse return error.OutOfMemory;
         @memcpy(mem[0..size], @as([*]const u8, @ptrCast(data))[0..size]);
-        try self.custom.append(alloc, .{ .type_id = id, .data = mem });
+        try self.custom.append(world.allocator, .{ .type_id = id, .data = mem });
     }
 
     //Invokes `handler` for every queued structural event, then clears the
@@ -773,8 +801,8 @@ pub const Events = struct {
     }
 
     //Invokes `handler` for every custom event of type `T`, then removes them.
-    pub fn drainCustom(self: *Events, comptime T: type, handler: *const fn (T) void) void {
-        const id = typeToId(T);
+    pub fn drainCustom(self: *Events, world: *World, comptime T: type, handler: *const fn (T) void) void {
+        const id = world.typeId(T);
         var i: usize = 0;
         while (i < self.custom.items.len) {
             if (self.custom.items[i].type_id == id) {
@@ -843,16 +871,16 @@ pub const Observers = struct {
         try self.entity_destroy.append(alloc, .{ .zig = cb });
     }
 
-    pub fn onComponentAdd(self: *Observers, alloc: std.mem.Allocator, comptime T: type, cb: ComponentFn) !void {
-        try self.onComponentAddId(alloc, typeToId(T), cb);
+    pub fn onComponentAdd(self: *Observers, world: *World, comptime T: type, cb: ComponentFn) !void {
+        try self.onComponentAddId(world.allocator, world.typeId(T), cb);
     }
 
-    pub fn onComponentRemove(self: *Observers, alloc: std.mem.Allocator, comptime T: type, cb: ComponentFn) !void {
-        try self.onComponentRemoveId(alloc, typeToId(T), cb);
+    pub fn onComponentRemove(self: *Observers, world: *World, comptime T: type, cb: ComponentFn) !void {
+        try self.onComponentRemoveId(world.allocator, world.typeId(T), cb);
     }
 
-    pub fn onComponentChange(self: *Observers, alloc: std.mem.Allocator, comptime T: type, cb: ComponentFn) !void {
-        try self.onComponentChangeId(alloc, typeToId(T), cb);
+    pub fn onComponentChange(self: *Observers, world: *World, comptime T: type, cb: ComponentFn) !void {
+        try self.onComponentChangeId(world.allocator, world.typeId(T), cb);
     }
 
     pub fn onComponentAddId(self: *Observers, alloc: std.mem.Allocator, type_id: u32, cb: ComponentFn) !void {
@@ -949,6 +977,7 @@ pub const World = struct {
     events: Events,
     observers: Observers = .{},
     archetypes: Archetypes = .{},
+    types: TypeRegistry = .{},
     _entities: []Entities,
     _components: []_Components,
     entities_len: usize = 0,
@@ -975,6 +1004,7 @@ pub const World = struct {
         world.events = Events.init(allocator);
         world.observers = .{};
         world.archetypes = .{};
+        world.types = .{};
 
         world.entities_len = 1;
         world.components_len = 1;
@@ -993,7 +1023,6 @@ pub const World = struct {
             e.alive = false;
             e.generation = 0;
             e.owned = .{};
-            e.signature = 0;
             e.archetype = Archetypes.nil;
             e.archetype_row = 0;
         }
@@ -1008,13 +1037,15 @@ pub const World = struct {
         world._components[components_idx].chunk = 0;
         world._components[components_idx].sparse = try allocator.alloc(Component, CHUNK_SIZE);
 
-        var i: usize = 0;
-        while (i < MAX_COMPONENTS) {
-            world._entities[entities_idx].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).empty;
-            i += 1;
-        }
-
         return world;
+    }
+
+    pub inline fn typeId(self: *World, comptime T: type) u32 {
+        return self.types.registerZig(self.allocator, T) catch unreachable;
+    }
+
+    pub inline fn typeIdC(self: *World, ct: c_type) u32 {
+        return self.types.registerC(self.allocator, ct) catch unreachable;
     }
 
     //Returns a fresh command buffer bound to this world. Caller owns it and
@@ -1030,31 +1061,31 @@ pub const World = struct {
     }
 
     pub fn insertResource(self: *World, comptime T: type, value: T) !void {
-        try self.resources.insert(self.allocator, T, value);
+        try self.resources.insert(self, T, value);
     }
 
     pub inline fn getResource(self: *World, comptime T: type) ?*T {
-        return self.resources.get(T);
+        return self.resources.get(self, T);
     }
 
     pub fn removeResource(self: *World, comptime T: type) void {
-        self.resources.remove(self.allocator, T);
+        self.resources.remove(self, T);
     }
 
     pub fn emitEvent(self: *World, comptime T: type, value: T) !void {
-        try self.events.emit(self.allocator, T, value);
+        try self.events.emit(self, T, value);
     }
 
     pub fn onComponentAdd(self: *World, comptime T: type, cb: Observers.ComponentFn) !void {
-        try self.observers.onComponentAdd(self.allocator, T, cb);
+        try self.observers.onComponentAdd(self, T, cb);
     }
 
     pub fn onComponentRemove(self: *World, comptime T: type, cb: Observers.ComponentFn) !void {
-        try self.observers.onComponentRemove(self.allocator, T, cb);
+        try self.observers.onComponentRemove(self, T, cb);
     }
 
     pub fn onComponentChange(self: *World, comptime T: type, cb: Observers.ComponentFn) !void {
-        try self.observers.onComponentChange(self.allocator, T, cb);
+        try self.observers.onComponentChange(self, T, cb);
     }
 
     pub fn onEntitySpawn(self: *World, cb: Observers.EntityFn) !void {
@@ -1065,22 +1096,12 @@ pub const World = struct {
         try self.observers.onEntityDestroy(self.allocator, cb);
     }
 
-    //Widens `entity`'s signature with `tid` and moves it to the matching
-    //archetype. No-op if the entity already owns a component of that type.
-    fn archetypeOnTypeAdded(self: *World, entity: *Entity, tid: u32) !void {
-        const bit = signatureBit(tid);
-        if (entity.signature & bit != 0) return;
-        try self.archetypes.move(self.allocator, self, entity, entity.signature | bit);
-    }
-
-    //Narrows `entity`'s signature if it no longer owns any component of `tid`
-    //(entities can own several components of one type, so removal of one
-    //doesn't necessarily clear the bit).
-    fn archetypeOnTypeMaybeRemoved(self: *World, entity: *Entity, tid: u32) !void {
-        const bit = signatureBit(tid);
-        if (entity.signature & bit == 0) return;
-        if (entity.ownsType(tid)) return;
-        try self.archetypes.move(self.allocator, self, entity, entity.signature & ~bit);
+    //Rebuilds the entity's archetype from its owned components and moves it if
+    //the signature changed.
+    fn archetypeRefresh(self: *World, entity: *Entity) !void {
+        var sig = try TypeSignature.fromEntity(self.allocator, entity);
+        defer sig.deinit(self.allocator);
+        try self.archetypes.move(self.allocator, self, entity, &sig);
     }
 
     //Queues a structural event and invokes matching observers. Called from
@@ -1140,6 +1161,7 @@ pub const World = struct {
         self.events.deinit(self.allocator);
         self.observers.deinit(self.allocator);
         self.archetypes.deinit(self.allocator);
+        self.types.deinit(self.allocator);
         var i: usize = 0;
         while (i < self.components_len) : (i += 1)
             self.allocator.free(self._components[i].sparse);
@@ -1355,7 +1377,9 @@ pub const Component = struct {
     magic: usize = MAGIC,
 
     pub inline fn is(self: *const Component, comp_type: anytype) bool {
-        if (self.typeId == typeToId(comp_type)) {
+        const world = @as(*World, @ptrCast(@alignCast(self.world)));
+        const T = if (@TypeOf(comp_type) == type) comp_type else @TypeOf(comp_type);
+        if (self.typeId == world.typeId(T)) {
             return true;
         } else {
             return false;
@@ -1374,7 +1398,7 @@ pub const Component = struct {
             @field(field_ptr, name) = @field(members, name);
         }
         const world = @as(*World, @ptrCast(@alignCast(component.world)));
-        const tid = typeToId(comp_type);
+        const tid = world.typeId(comp_type);
         if (component.owners.len > 0) {
             if (resolveGlobalId(world, component.owners.first)) |entity| {
                 world.signalComponentChanged(entity, component, tid);
@@ -1392,12 +1416,12 @@ pub const Component = struct {
         if (self.owners.len > 0) {
             if (resolveGlobalId(world, self.owners.first)) |e| {
                 e.owned.remove(self);
-                if (self.typeId) |tid| world.archetypeOnTypeMaybeRemoved(e, tid) catch unreachable;
+                world.archetypeRefresh(e) catch unreachable;
             }
             for (self.owners.rest.items) |gid| {
                 if (resolveGlobalId(world, gid)) |e| {
                     e.owned.remove(self);
-                    if (self.typeId) |tid| world.archetypeOnTypeMaybeRemoved(e, tid) catch unreachable;
+                    world.archetypeRefresh(e) catch unreachable;
                 }
             }
         }
@@ -1413,11 +1437,11 @@ pub const Component = struct {
     }
 
     pub inline fn dealloc(self: *Component) void {
-        const world = @as(*World, @ptrCast(@alignCast(self.world)));
-
         if (!self.alive and self.magic == MAGIC and self.allocated) {
             if (self.data) |data| {
-                opaqueDestroy(world.allocator, data, types_size[@as(usize, @intCast(self.typeId.?))], types_align[@as(usize, @intCast(self.typeId.?))]);
+                const w = @as(*World, @ptrCast(@alignCast(self.world)));
+                const tid = self.typeId.?;
+                opaqueDestroy(w.allocator, data, w.types.sizeOf(tid), w.types.alignOf(tid));
             }
             self.allocated = false;
         }
@@ -1452,7 +1476,6 @@ pub const Entity = struct {
     world: ?*anyopaque,
     allocated: bool = false,
     owned: OwnedComponents = .{}, //reverse index of components this entity owns
-    signature: Signature = 0, //bitmask of component types this entity owns
     archetype: u32 = Archetypes.nil, //index into world.archetypes.list
     archetype_row: u32 = 0, //position within that archetype's entity list
 
@@ -1460,6 +1483,12 @@ pub const Entity = struct {
     //`world.entities.resolve`/`isValid`, even after this slot is recycled.
     pub inline fn ref(self: *const Entity) EntityRef {
         return .{ .chunk = @intCast(self.chunk), .id = self.id, .generation = self.generation };
+    }
+
+    //Returns this entity's archetype signature (sorted owned type ids).
+    pub inline fn signature(self: *const Entity) *const TypeSignature {
+        const world = @as(*World, @ptrCast(@alignCast(self.world)));
+        return &world.archetypes.list.items[self.archetype].signature;
     }
 
     pub inline fn addComponent(ctx: *Entity, comp_val: anytype) !*Component {
@@ -1470,7 +1499,8 @@ pub const Entity = struct {
     }
 
     pub inline fn getOneComponent(ctx: *Entity, comptime comp_type: type) ?*const Component {
-        return ctx.getOneComponentById(typeToId(comp_type));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return ctx.getOneComponentById(world.typeId(comp_type));
     }
 
     //Runtime (type-id) variant of getOneComponent, used by the C API.
@@ -1503,7 +1533,8 @@ pub const Entity = struct {
 
     //Returns true if this entity owns at least one component of the given type.
     pub inline fn has(ctx: *Entity, comptime comp_type: type) bool {
-        return ctx.hasById(typeToId(comp_type));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return ctx.hasById(world.typeId(comp_type));
     }
 
     //Runtime (type-id) variant of has, used by the C API.
@@ -1514,14 +1545,16 @@ pub const Entity = struct {
     //Returns a typed pointer to the data of one component of the given type
     //owned by this entity, or null if it has none.
     pub inline fn get(ctx: *Entity, comptime comp_type: type) ?*comp_type {
-        const component = ctx.getOneComponentById(typeToId(comp_type)) orelse return null;
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const component = ctx.getOneComponentById(world.typeId(comp_type)) orelse return null;
         return component.get(comp_type);
     }
 
     //Detaches every component of the given type from this entity. Any component
     //left without owners is destroyed so its slot can be reused (run gc to free).
     pub fn remove(ctx: *Entity, comptime comp_type: type) !void {
-        return ctx.removeById(typeToId(comp_type));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return ctx.removeById(world.typeId(comp_type));
     }
 
     //Runtime (type-id) variant of remove, used by the C API.
@@ -1535,6 +1568,7 @@ pub const Entity = struct {
 
     pub fn attach(self: *Entity, component: *Component, comp_type: anytype) !void {
         const world = @as(*World, @ptrCast(@alignCast(component.world)));
+        const tid = world.typeId(@TypeOf(comp_type));
 
         if (@sizeOf(@TypeOf(comp_type)) > 0) {
             if (!component.allocated) {
@@ -1543,12 +1577,13 @@ pub const Entity = struct {
                 const oref = @as(?*anyopaque, @ptrCast(data));
                 component.data = oref;
             } else {
-                if (component.allocated and component.typeId == typeToId(@TypeOf(comp_type))) {
+                if (component.allocated and component.typeId == tid) {
                     const data = CastData(@TypeOf(comp_type), component.data);
                     data.* = comp_type;
                 } else {
-                    if (component.allocated and component.typeId != typeToId(@TypeOf(comp_type))) {
-                        opaqueDestroy(world.allocator, component.data, types_size[@as(usize, @intCast(typeToId(@TypeOf(comp_type))))], types_align[@as(usize, @intCast(typeToId(@TypeOf(comp_type))))]);
+                    if (component.allocated and component.typeId != tid) {
+                        const old_tid = component.typeId.?;
+                        opaqueDestroy(world.allocator, component.data, world.types.sizeOf(old_tid), world.types.alignOf(old_tid));
                         const data = try world.allocator.create(@TypeOf(comp_type));
                         data.* = comp_type;
                         const oref = @as(?*anyopaque, @ptrCast(data));
@@ -1560,33 +1595,32 @@ pub const Entity = struct {
         component.attached = true;
         component.allocated = true;
 
-        world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
         try component.owners.add(world.allocator, entityGlobalId(self));
         try self.owned.add(world.allocator, component);
-        if (component.typeId) |tid| {
-            try world.archetypeOnTypeAdded(self, tid);
-            world.signalComponentAdded(self, component, tid);
-        }
+        try world.archetypeRefresh(self);
+        if (component.typeId) |ctid| world.signalComponentAdded(self, component, ctid);
     }
 
     pub fn attach_c(self: *Entity, component: *Component, comp_type: *c_type) !void {
         const world = @as(*World, @ptrCast(@alignCast(component.world)));
+        const tid = world.typeIdC(comp_type.*);
 
-        if (@sizeOf(@TypeOf(comp_type)) > 0) {
+        if (comp_type.size > 0) {
             if (!component.allocated) {
-                const data = try world.allocator.create(@TypeOf(comp_type));
-                data.* = comp_type;
+                const data = try world.allocator.create(c_type);
+                data.* = comp_type.*;
                 const oref = @as(?*anyopaque, @ptrCast(data));
                 component.data = oref;
             } else {
-                if (component.allocated and component.typeId == typeToId(@TypeOf(comp_type))) {
-                    const data = CastData(@TypeOf(comp_type), component.data);
-                    data.* = comp_type;
+                if (component.allocated and component.typeId == tid) {
+                    const data = CastData(c_type, component.data);
+                    data.* = comp_type.*;
                 } else {
-                    if (component.allocated and component.typeId != typeToId(@TypeOf(comp_type))) {
-                        opaqueDestroy(world.allocator, component.data, types_size[@as(usize, @intCast(typeToIdC(comp_type)))], types_align[@as(usize, @intCast(typeToIdC(comp_type)))]);
-                        const data = try world.allocator.create(@TypeOf(comp_type));
-                        data.* = comp_type;
+                    if (component.allocated and component.typeId != tid) {
+                        const old_tid = component.typeId.?;
+                        opaqueDestroy(world.allocator, component.data, world.types.sizeOf(old_tid), world.types.alignOf(old_tid));
+                        const data = try world.allocator.create(c_type);
+                        data.* = comp_type.*;
                         const oref = @as(?*anyopaque, @ptrCast(data));
                         component.data = oref;
                     }
@@ -1596,13 +1630,10 @@ pub const Entity = struct {
         component.attached = true;
         component.allocated = true;
 
-        world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
         try component.owners.add(world.allocator, entityGlobalId(self));
         try self.owned.add(world.allocator, component);
-        if (component.typeId) |tid| {
-            try world.archetypeOnTypeAdded(self, tid);
-            world.signalComponentAdded(self, component, tid);
-        }
+        try world.archetypeRefresh(self);
+        if (component.typeId) |ctid| world.signalComponentAdded(self, component, ctid);
     }
 
     pub inline fn detach(self: *Entity, component: *Component) !void {
@@ -1611,11 +1642,8 @@ pub const Entity = struct {
         component.attached = false;
         component.owners.remove(entityGlobalId(self));
         self.owned.remove(component);
-        world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, false);
-        if (component.typeId) |tid| {
-            try world.archetypeOnTypeMaybeRemoved(self, tid);
-            world.signalComponentRemoved(self, component, tid);
-        }
+        try world.archetypeRefresh(self);
+        if (component.typeId) |tid| world.signalComponentRemoved(self, component, tid);
     }
 
     pub inline fn destroy(self: *Entity) void {
@@ -1633,16 +1661,12 @@ pub const Entity = struct {
             const component = self.owned.at(k);
             if (component.typeId) |tid| world.signalComponentRemoved(self, component, tid);
             component.owners.remove(gid);
-            if (component.typeId) |tid|
-                world._entities[self.chunk].component_mask[@as(usize, @intCast(tid))].setValue(component.id, false);
             if (component.owners.count() == 0)
                 component.destroy();
         }
         self.owned.clear(world.allocator);
 
-        //Drop out of the archetype index before the slot can be recycled.
         world.archetypes.remove(world, self);
-        self.signature = 0;
 
         world.signalEntityDestroyed(self);
         self.alive = false;
@@ -1666,51 +1690,12 @@ pub const Entity = struct {
 };
 
 //Do not inline
-pub fn typeToId(comptime T: type) u32 {
-    //Stable, unique-per-type key. The type name is interned once per distinct
-    //type, so its pointer is a reliable identity (the previous &struct{var x}
-    //trick collapsed all types to one address because it never captured T).
-    const longId = @intFromPtr(@typeName(T).ptr);
-
-    var found = false;
-    var i: usize = 0;
-    while (i < type_idx) : (i += 1) {
-        if (types[i] == longId) {
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        //Registering past the cap would write out of bounds and produce type
-        //ids that don't fit in a Signature; fail loudly instead.
-        std.debug.assert(type_idx < MAX_COMPONENTS);
-        types[type_idx] = longId;
-        types_size[type_idx] = @sizeOf(T);
-        types_align[type_idx] = @alignOf(T);
-        type_idx += 1;
-    }
-    return @as(u32, @intCast(i));
+pub fn typeToId(world: *World, comptime T: type) u32 {
+    return world.typeId(T);
 }
 
-pub fn typeToIdC(comp_type: c_type) u32 {
-    const longId = comp_type.id;
-
-    var found = false;
-    var i: usize = 0;
-    while (i < type_idx) : (i += 1) {
-        if (types[i] == longId) {
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        std.debug.assert(type_idx < MAX_COMPONENTS);
-        types[type_idx] = longId;
-        types_size[type_idx] = comp_type.size;
-        types_align[type_idx] = comp_type.alignof;
-        type_idx += 1;
-    }
-    return @as(u32, @intCast(i));
+pub fn typeToIdC(world: *World, ct: c_type) u32 {
+    return world.typeIdC(ct);
 }
 
 pub inline fn Cast(comptime T: type, component: ?*Component) *T {
@@ -1765,14 +1750,8 @@ pub const SuperEntities = struct {
             e.alive = false;
             e.generation = 0;
             e.owned = .{};
-            e.signature = 0;
             e.archetype = Archetypes.nil;
             e.archetype_row = 0;
-        }
-
-        var i: usize = 0;
-        while (i < MAX_COMPONENTS) : (i += 1) {
-            world._entities[world.entities_len].component_mask[i] = std.StaticBitSet(CHUNK_SIZE).empty;
         }
 
         world.entities_len += 1;
@@ -1864,36 +1843,32 @@ pub const SuperEntities = struct {
     pub fn iteratorFilter(ctx: *SuperEntities, comptime comp_type: type) SuperEntities.MaskedIterator {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
         const entities = &world._entities;
-
-        //get an iterator for entities that own a component of this type
-        return .{ .ctx = entities, .filter_type = typeToId(comp_type), .alive = CHUNK_SIZE * world.components_len, .world = world };
+        return .{ .ctx = entities, .filter_type = world.typeId(comp_type), .alive = CHUNK_SIZE * world.components_len, .world = world };
     }
 
-    //Multi-component query: yields entities that own a component of every
-    //`include` type and none of the `exclude` types.
-    //
-    //Archetype-backed: candidate archetypes are matched with two mask ops on
-    //their signature, then only the entities inside matching archetypes are
-    //visited. Cost scales with archetype count + matching entities, not
-    //world size * filter types.
-    //
-    //Structural changes (attach/detach/destroy) move entities between
-    //archetypes mid-iteration and can skip or repeat entities; defer such
-    //changes with a CommandBuffer while a query is live.
     pub const QueryIterator = struct {
         world: *World,
-        include_mask: Signature = 0,
-        exclude_mask: Signature = 0,
+        include_storage: [64]u32 = undefined,
+        exclude_storage: [64]u32 = undefined,
+        include: []const u32 = &.{},
+        exclude: []const u32 = &.{},
         arch_index: usize = 0,
         row: usize = 0,
+        heap_include: ?[]u32 = null,
+        heap_exclude: ?[]u32 = null,
+
+        pub fn deinit(self: *QueryIterator, alloc: std.mem.Allocator) void {
+            if (self.heap_include) |buf| alloc.free(buf);
+            if (self.heap_exclude) |buf| alloc.free(buf);
+            self.heap_include = null;
+            self.heap_exclude = null;
+        }
 
         pub fn next(it: *QueryIterator) ?*Entity {
             const archetypes = it.world.archetypes.list.items;
             while (it.arch_index < archetypes.len) {
                 const arch = &archetypes[it.arch_index];
-                if ((arch.signature & it.include_mask) != it.include_mask or
-                    (arch.signature & it.exclude_mask) != 0)
-                {
+                if (!arch.signature.matches(it.include, it.exclude)) {
                     it.arch_index += 1;
                     it.row = 0;
                     continue;
@@ -1906,26 +1881,48 @@ pub const SuperEntities = struct {
                 it.arch_index += 1;
                 it.row = 0;
             }
-
             return null;
         }
     };
 
-    //Query entities owning a component of every type in the `include` tuple,
-    //e.g. `world.entities.query(.{ Apple, Orange })`. An empty tuple matches
-    //every live entity.
-    pub fn query(ctx: *SuperEntities, comptime include: anytype) SuperEntities.QueryIterator {
-        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        var mask: Signature = 0;
-        inline for (include) |T| mask |= signatureBit(typeToId(T));
-        return .{ .world = world, .include_mask = mask };
+    pub fn buildQueryFilter(world: *World, comptime include: anytype, comptime exclude: anytype) QueryIterator {
+        var it: QueryIterator = .{ .world = world };
+        var inc_len: usize = 0;
+        inline for (include) |T| {
+            it.include_storage[inc_len] = world.typeId(T);
+            inc_len += 1;
+        }
+        it.include = it.include_storage[0..inc_len];
+        var exc_len: usize = 0;
+        inline for (exclude) |T| {
+            it.exclude_storage[exc_len] = world.typeId(T);
+            exc_len += 1;
+        }
+        std.mem.sort(u32, it.include_storage[0..inc_len], {}, std.sort.asc(u32));
+        std.mem.sort(u32, it.exclude_storage[0..exc_len], {}, std.sort.asc(u32));
+        it.exclude = it.exclude_storage[0..exc_len];
+        return it;
     }
 
-    //As `query`, but also excludes entities owning any type in `exclude`,
-    //e.g. `world.entities.queryExclude(.{ Apple }, .{ Orange })`.
+    pub fn query(ctx: *SuperEntities, comptime include: anytype) SuperEntities.QueryIterator {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return SuperEntities.buildQueryFilter(world, include, .{});
+    }
+
     pub fn queryExclude(ctx: *SuperEntities, comptime include: anytype, comptime exclude: anytype) SuperEntities.QueryIterator {
-        var it = ctx.query(include);
-        inline for (exclude) |T| it.exclude_mask |= signatureBit(typeToId(T));
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return SuperEntities.buildQueryFilter(world, include, exclude);
+    }
+
+    pub fn queryC(ctx: *SuperEntities, alloc: std.mem.Allocator, include: []const u32, exclude: []const u32) !QueryIterator {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        var it: QueryIterator = .{ .world = world };
+        it.heap_include = try alloc.dupe(u32, include);
+        it.heap_exclude = try alloc.dupe(u32, exclude);
+        it.include = it.heap_include.?;
+        it.exclude = it.heap_exclude.?;
+        std.mem.sort(u32, it.heap_include.?, {}, std.sort.asc(u32));
+        std.mem.sort(u32, it.heap_exclude.?, {}, std.sort.asc(u32));
         return it;
     }
 };
@@ -1937,7 +1934,6 @@ const Entities = struct {
     free_idx: u32 = 0,
     world: ?*anyopaque = undefined, //Defeats cyclical reference checking
     created: u32 = 0,
-    component_mask: [MAX_COMPONENTS]std.StaticBitSet(CHUNK_SIZE),
 
     pub inline fn create(ctx: *Entities) !*Entity {
         //most ECS cheat here and don't allocate memory until a component is assigned
@@ -1963,7 +1959,6 @@ const Entities = struct {
         entity.alive = true;
         entity.world = ctx.world;
         entity.chunk = entities_idx;
-        entity.signature = 0;
         entity.archetype = Archetypes.nil;
         entity.archetype_row = 0;
 
@@ -1971,9 +1966,8 @@ const Entities = struct {
         ctx.free_idx += 1;
 
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        //Component-less entities live in the signature-0 archetype so that
-        //every live entity is reachable through the archetype index.
-        try world.archetypes.insert(world.allocator, entity, 0);
+        const empty_sig: TypeSignature = .{};
+        try world.archetypes.insert(world.allocator, entity, &empty_sig);
         world.signalEntitySpawned(entity);
 
         return entity;
@@ -2083,11 +2077,11 @@ pub const CommandBuffer = struct {
     }
 
     pub fn remove(self: *CommandBuffer, ref: EntityRef, comptime T: type) !void {
-        try self.cmds.append(self.world.allocator, .{ .remove = .{ .target = .{ .existing = ref }, .type_id = typeToId(T) } });
+        try self.cmds.append(self.world.allocator, .{ .remove = .{ .target = .{ .existing = ref }, .type_id = self.world.typeId(T) } });
     }
 
     pub fn removeDeferred(self: *CommandBuffer, d: Deferred, comptime T: type) !void {
-        try self.cmds.append(self.world.allocator, .{ .remove = .{ .target = d.target(), .type_id = typeToId(T) } });
+        try self.cmds.append(self.world.allocator, .{ .remove = .{ .target = d.target(), .type_id = self.world.typeId(T) } });
     }
 
     fn resolveTarget(self: *CommandBuffer, t: Target) ?*Entity {
@@ -2178,7 +2172,7 @@ pub const SystemContext = struct {
     //Returns a mutable pointer to a world-scoped singleton of type `T`, or null
     //if none has been inserted yet.
     pub inline fn resource(self: *SystemContext, comptime T: type) ?*T {
-        return self.world.resources.get(T);
+        return self.world.resources.get(self.world, T);
     }
 
     pub inline fn events(self: *SystemContext) *Events {
@@ -2671,13 +2665,12 @@ test "archetype index groups entities by signature" {
     _ = try e3.addComponent(A{});
     _ = try e3.addComponent(B{});
 
-    // Three occupied archetypes: {}, {A}, {A,B}.
     try std.testing.expectEqual(@as(usize, 3), world.archetypes.count());
-    try std.testing.expectEqual(@as(Signature, 0), e1.signature);
-    try std.testing.expectEqual(signatureBit(typeToId(A)), e2.signature);
-    try std.testing.expectEqual(signatureBit(typeToId(A)) | signatureBit(typeToId(B)), e3.signature);
+    try std.testing.expectEqual(@as(usize, 0), e1.signature().ids.items.len);
+    try std.testing.expect(e2.signature().contains(world.typeId(A)));
+    try std.testing.expect(e3.signature().contains(world.typeId(A)));
+    try std.testing.expect(e3.signature().contains(world.typeId(B)));
 
-    // Include+exclude resolves purely through archetype signatures.
     var only_a: usize = 0;
     var q = world.entities.queryExclude(.{A}, .{B});
     while (q.next()) |e| {
@@ -2686,10 +2679,9 @@ test "archetype index groups entities by signature" {
     }
     try std.testing.expectEqual(@as(usize, 1), only_a);
 
-    // Removing B moves e3 back into e2's archetype.
     try e3.remove(B);
-    try std.testing.expectEqual(e2.signature, e3.signature);
     try std.testing.expectEqual(e2.archetype, e3.archetype);
+    try std.testing.expect(e2.signature().eql(e3.signature().*));
 }
 
 test "archetype swap-remove keeps rows consistent across destroys" {
@@ -2718,7 +2710,7 @@ test "archetype swap-remove keeps rows consistent across destroys" {
     try std.testing.expectEqual(@as(usize, 2), seen);
 }
 
-test "signature bit persists while entity owns multiple components of one type" {
+test "signature persists while entity owns multiple components of one type" {
     const A = struct { v: u32 = 0 };
 
     var world = try World.create();
@@ -2727,17 +2719,15 @@ test "signature bit persists while entity owns multiple components of one type" 
     const e = try world.entities.create();
     const c1 = try e.addComponent(A{ .v = 1 });
     const c2 = try e.addComponent(A{ .v = 2 });
-    try std.testing.expect(e.signature & signatureBit(typeToId(A)) != 0);
+    try std.testing.expect(e.signature().contains(world.typeId(A)));
 
-    // Still owns c2 of type A: the bit must remain set.
     try e.detach(c1);
     try std.testing.expect(e.has(A));
-    try std.testing.expect(e.signature & signatureBit(typeToId(A)) != 0);
+    try std.testing.expect(e.signature().contains(world.typeId(A)));
 
-    // Last one gone: signature narrows back to empty.
     try e.detach(c2);
     try std.testing.expect(!e.has(A));
-    try std.testing.expectEqual(@as(Signature, 0), e.signature);
+    try std.testing.expectEqual(@as(usize, 0), e.signature().ids.items.len);
 }
 
 test "empty query yields every live entity via the archetype index" {
@@ -2766,18 +2756,54 @@ test "component destroy narrows owning entities' archetypes" {
     const c = try world.components.create(A);
     try e1.attach(c, A{ .v = 1 });
     try e2.attach(c, A{ .v = 1 });
-    try std.testing.expect(e1.signature != 0);
-    try std.testing.expect(e2.signature != 0);
+    try std.testing.expect(e1.signature().contains(world.typeId(A)));
+    try std.testing.expect(e2.signature().contains(world.typeId(A)));
 
     // Destroying the shared component must narrow BOTH owners back to {}.
     c.destroy();
-    try std.testing.expectEqual(@as(Signature, 0), e1.signature);
-    try std.testing.expectEqual(@as(Signature, 0), e2.signature);
+    try std.testing.expectEqual(@as(usize, 0), e1.signature().ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), e2.signature().ids.items.len);
 
     var seen: usize = 0;
     var q = world.entities.query(.{A});
     while (q.next()) |_| seen += 1;
     try std.testing.expectEqual(@as(usize, 0), seen);
+}
+
+test "per-world type registry supports many component types" {
+    var world = try World.create();
+    defer world.destroy();
+
+    var i: u32 = 0;
+    while (i < 80) : (i += 1) {
+        const ct = c_type{ .id = @as(usize, @intCast(i)) + 1000, .size = 4, .alignof = 4, .name = null };
+        const id = world.typeIdC(ct);
+        try std.testing.expectEqual(i, id);
+    }
+    try std.testing.expectEqual(@as(u32, 80), world.types.count());
+
+    var ct79 = c_type{ .id = 79 + 1000, .size = @sizeOf(u32), .alignof = @alignOf(u32), .name = null };
+    const e = try world.entities.create();
+    const c = try world.components.create_c(ct79);
+    try e.attach_c(c, &ct79);
+    try std.testing.expect(e.hasById(79));
+}
+
+test "type registries are isolated per world" {
+    const Shared = struct { v: u32 = 0 };
+
+    var w1 = try World.create();
+    defer w1.destroy();
+    var w2 = try World.create();
+    defer w2.destroy();
+
+    const id1 = w1.typeId(Shared);
+    const id2 = w2.typeId(Shared);
+    try std.testing.expectEqual(@as(u32, 0), id1);
+    try std.testing.expectEqual(@as(u32, 0), id2);
+
+    _ = try w1.entities.create();
+    try std.testing.expectEqual(@as(u32, 0), w2.entities.count());
 }
 
 test "structural events queue lifecycle changes" {

@@ -20,7 +20,7 @@ Coyote ECS is a lightweight, high-performance Entity Component System designed f
 
 - **Zig 0.17** — current build API and stdlib compatibility
 - **Entity/component accessors** — `has`, `get`, `remove` with C API parity
-- **Multi-component queries** — `query` / `queryExclude` with AND + NOT filtering
+- **Archetype-backed queries** — `query` / `queryExclude` match entity groups by signature bitmask (AND + NOT)
 - **Generational handles** — `EntityRef` survives slot recycling safely
 - **Chunk-aware ownership** — exact queries and filters across entity chunks
 - **Command buffer** — defer structural changes during iteration

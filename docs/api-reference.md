@@ -332,7 +332,7 @@ while (it.next()) |entity| {
 
 #### `query(ctx: *SuperEntities, comptime include: anytype) SuperEntities.QueryIterator`
 
-Multi-component AND query. Yields entities owning every type in the tuple.
+Multi-component AND query, backed by the archetype index (signature bitmask matching per archetype rather than per-entity probing). Yields entities owning every type in the tuple; an empty tuple yields every live entity.
 
 ```zig
 var q = world.entities.query(.{ Position, Velocity });
@@ -630,8 +630,10 @@ typedef struct coyote_type {
 | `coyote_components_iterator_filter_next(it)` | Next component |
 | `coyote_entities_iterator_filter(world, type)` | Entities by type |
 | `coyote_entities_iterator_filter_next(it)` | Next entity |
-| `coyote_entities_query(world, include, n, exclude, n)` | Multi-component query |
+| `coyote_entities_query(world, include, n, exclude, n)` | Multi-component query (archetype-backed) |
 | `coyote_entities_query_next(it)` | Next query result |
+| `coyote_archetypes_count(world)` | Occupied archetype count |
+| `coyote_entity_signature(entity)` | Component-type bitmask of an entity |
 
 ### Command Buffer
 

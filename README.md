@@ -6,7 +6,7 @@ Builds against **Zig 0.17.0**
 ### Features
 
 - Entity/component accessors (`has`, `get`, `remove`)
-- Multi-component queries (`query`, `queryExclude`)
+- Archetype-backed multi-component queries (`query`, `queryExclude`)
 - Generational entity handles (`EntityRef`)
 - Command buffer for deferred structural changes
 - Staged scheduler with per-stage flush

@@ -90,6 +90,10 @@ pub fn main() !void {
     while (q3.next()) |_| orange_not_apple += 1;
     std.log.info("Query [Orange WITHOUT Apple]: {} (anOrange)", .{orange_not_apple});
 
+    //Queries are archetype-backed: entities are grouped by component signature.
+    //Right now: {Pear=empty}, {Orange}, {Apple}, {Orange,Apple} = 4 occupied.
+    std.log.info("Occupied archetypes: {}", .{world.archetypes.count()});
+
     try combo.remove(Components.Orange);
     try combo.remove(Components.Apple);
     combo.destroy();

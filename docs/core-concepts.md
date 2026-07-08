@@ -141,7 +141,20 @@ var q2 = world.entities.queryExclude(.{Components.Position}, .{Components.Veloci
 while (q.next()) |entity| { /* ... */ }
 ```
 
-Queries perform a linear scan with `hasById` per filter type. This is fine for modest worlds; archetype caching is a future optimization.
+Queries are **archetype-backed**: every live entity belongs to exactly one archetype (the group of entities sharing its component-type signature), and a query matches whole archetypes with two bitmask operations before visiting only the entities inside them. Cost scales with the number of archetypes plus matching entities, not with world size times filter count.
+
+Structural changes (attach/detach/destroy) move entities between archetypes, which can skip or repeat entities mid-query — defer them with a command buffer while a query is live.
+
+### Archetypes
+
+The archetype index is maintained automatically:
+
+- `world.entities.create()` places the entity in the empty (signature-0) archetype
+- `attach` widens the entity's signature and moves it; `detach`/`remove` narrow it once the last component of a type is gone
+- `entity.destroy()` removes the entity from the index
+- Component data stays in chunked storage — archetypes are an index over it, so component pointers remain stable
+
+Introspection: `world.archetypes.count()` returns the number of occupied archetypes, and `entity.signature` is the bitmask of owned type ids.
 
 ## Command Buffer
 

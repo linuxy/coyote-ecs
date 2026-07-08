@@ -123,6 +123,9 @@ int main(void) {
     while(coyote_entities_query_next(q)) q_count++;
     printf("Query [apple WITHOUT orange] entities: %d\n", q_count);
 
+    // Queries are archetype-backed: entities are grouped by component signature.
+    printf("Occupied archetypes: %d\n", coyote_archetypes_count(world));
+
     coyote_entity_remove(e_apple, t_apple);
     printf("Apple entity has apple component after remove: %d\n", coyote_entity_has(e_apple, t_apple));
 

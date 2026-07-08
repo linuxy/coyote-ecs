@@ -237,25 +237,35 @@ export fn coyote_entities_iterator_next(iterator_ptr: usize) usize {
 export fn coyote_entities_query(world_ptr: usize, include: [*c]const coyote.c_type, include_n: usize, exclude: [*c]const coyote.c_type, exclude_n: usize) usize {
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
     const iterator = coyote.allocator.create(coyote.SuperEntities.QueryIterator) catch unreachable;
+
+    var include_mask: coyote.Signature = 0;
+    var exclude_mask: coyote.Signature = 0;
+    var i: usize = 0;
+    while (i < include_n) : (i += 1)
+        include_mask |= coyote.signatureBit(coyote.typeToIdC(include[i]));
+    i = 0;
+    while (i < exclude_n) : (i += 1)
+        exclude_mask |= coyote.signatureBit(coyote.typeToIdC(exclude[i]));
+
     iterator.* = coyote.SuperEntities.QueryIterator{
-        .ctx = &world._entities,
         .world = world,
-        .total = coyote.CHUNK_SIZE * world.entities_len,
+        .include_mask = include_mask,
+        .exclude_mask = exclude_mask,
     };
 
-    var i: usize = 0;
-    while (i < include_n and iterator.include_len < coyote.MAX_COMPONENTS) : (i += 1) {
-        iterator.include_ids[iterator.include_len] = coyote.typeToIdC(include[i]);
-        iterator.include_len += 1;
-    }
-
-    i = 0;
-    while (i < exclude_n and iterator.exclude_len < coyote.MAX_COMPONENTS) : (i += 1) {
-        iterator.exclude_ids[iterator.exclude_len] = coyote.typeToIdC(exclude[i]);
-        iterator.exclude_len += 1;
-    }
-
     return @intFromPtr(iterator);
+}
+
+//Number of archetypes (distinct component-type signatures) currently holding
+//at least one live entity. Useful for diagnostics and tuning.
+export fn coyote_archetypes_count(world_ptr: usize) c_int {
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    return @as(c_int, @intCast(world.archetypes.count()));
+}
+
+//Signature (component-type bitmask) of a live entity, for diagnostics.
+export fn coyote_entity_signature(entity: *coyote.Entity) u32 {
+    return entity.signature;
 }
 
 export fn coyote_entities_query_next(iterator_ptr: usize) usize {

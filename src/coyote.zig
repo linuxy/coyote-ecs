@@ -1,9 +1,21 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const MAX_COMPONENTS = 12; //Maximum number of component types, 10x runs 10x slower create O(n) TODO: Fix
+pub const MAX_COMPONENTS = 32; //Maximum number of component types; must fit in Signature's bit width
 pub const CHUNK_SIZE = 128; //Only operate on one chunk at a time
 pub const MAGIC = 0x0DEADB33F; //Helps check for optimizer related issues
+
+//One bit per registered component type. An entity's signature is the set of
+//types it currently owns; entities sharing a signature live in one archetype.
+pub const Signature = u32;
+
+comptime {
+    std.debug.assert(MAX_COMPONENTS <= @bitSizeOf(Signature));
+}
+
+pub inline fn signatureBit(tid: u32) Signature {
+    return @as(Signature, 1) << @intCast(tid);
+}
 
 pub const allocator = std.heap.c_allocator;
 
@@ -604,6 +616,87 @@ pub const Resources = struct {
     }
 };
 
+//Archetype index: groups live entities by their component-type signature.
+//
+//Every live entity belongs to exactly one archetype (the one matching its
+//signature; component-less entities live in the signature-0 archetype). The
+//index is maintained incrementally on attach/detach/destroy, so queries can
+//test a handful of archetype signatures with two mask operations instead of
+//probing every entity for every filter type.
+//
+//Entities are stored as generation-tagged global ids in a dense list per
+//archetype, with swap-remove + row fix-up for O(1) removal. Component data
+//itself stays in the existing chunked storage; this is an index over it, not
+//a table storage rewrite, so component pointers remain stable.
+pub const Archetypes = struct {
+    pub const nil: u32 = std.math.maxInt(u32);
+
+    pub const Archetype = struct {
+        signature: Signature = 0,
+        entities: std.ArrayListUnmanaged(u64) = .empty, //generation-tagged gids
+    };
+
+    map: std.AutoHashMapUnmanaged(Signature, u32) = .empty,
+    list: std.ArrayListUnmanaged(Archetype) = .empty,
+
+    pub fn deinit(self: *Archetypes, alloc: std.mem.Allocator) void {
+        for (self.list.items) |*a| a.entities.deinit(alloc);
+        self.list.deinit(alloc);
+        self.map.deinit(alloc);
+    }
+
+    //Number of archetypes currently holding at least one entity. Empty
+    //archetypes are kept (signatures recur), so this filters them out.
+    pub fn count(self: *const Archetypes) usize {
+        var n: usize = 0;
+        for (self.list.items) |a| {
+            if (a.entities.items.len > 0) n += 1;
+        }
+        return n;
+    }
+
+    fn indexFor(self: *Archetypes, alloc: std.mem.Allocator, sig: Signature) !u32 {
+        const gop = try self.map.getOrPut(alloc, sig);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = @intCast(self.list.items.len);
+            errdefer _ = self.map.remove(sig);
+            try self.list.append(alloc, .{ .signature = sig });
+        }
+        return gop.value_ptr.*;
+    }
+
+    //Places `entity` in the archetype for `sig` and records its position.
+    pub fn insert(self: *Archetypes, alloc: std.mem.Allocator, entity: *Entity, sig: Signature) !void {
+        const idx = try self.indexFor(alloc, sig);
+        const arch = &self.list.items[idx];
+        try arch.entities.append(alloc, entityGlobalId(entity));
+        entity.signature = sig;
+        entity.archetype = idx;
+        entity.archetype_row = @intCast(arch.entities.items.len - 1);
+    }
+
+    //Removes `entity` from its archetype (swap-remove; the entity swapped into
+    //the vacated row gets its row index fixed up).
+    pub fn remove(self: *Archetypes, world: *World, entity: *Entity) void {
+        if (entity.archetype == nil) return;
+        const arch = &self.list.items[entity.archetype];
+        const row = entity.archetype_row;
+        _ = arch.entities.swapRemove(row);
+        if (row < arch.entities.items.len) {
+            if (resolveGlobalId(world, arch.entities.items[row])) |moved|
+                moved.archetype_row = row;
+        }
+        entity.archetype = nil;
+    }
+
+    //Moves `entity` to the archetype for `new_sig` (no-op if already there).
+    pub fn move(self: *Archetypes, alloc: std.mem.Allocator, world: *World, entity: *Entity, new_sig: Signature) !void {
+        if (entity.archetype != nil and entity.signature == new_sig) return;
+        self.remove(world, entity);
+        try self.insert(alloc, entity, new_sig);
+    }
+};
+
 pub const EventKind = enum(u8) {
     entity_spawned,
     entity_destroyed,
@@ -855,6 +948,7 @@ pub const World = struct {
     resources: Resources = .{},
     events: Events,
     observers: Observers = .{},
+    archetypes: Archetypes = .{},
     _entities: []Entities,
     _components: []_Components,
     entities_len: usize = 0,
@@ -880,6 +974,7 @@ pub const World = struct {
         world.resources = .{};
         world.events = Events.init(allocator);
         world.observers = .{};
+        world.archetypes = .{};
 
         world.entities_len = 1;
         world.components_len = 1;
@@ -898,6 +993,9 @@ pub const World = struct {
             e.alive = false;
             e.generation = 0;
             e.owned = .{};
+            e.signature = 0;
+            e.archetype = Archetypes.nil;
+            e.archetype_row = 0;
         }
 
         world.systems = Systems{};
@@ -967,6 +1065,24 @@ pub const World = struct {
         try self.observers.onEntityDestroy(self.allocator, cb);
     }
 
+    //Widens `entity`'s signature with `tid` and moves it to the matching
+    //archetype. No-op if the entity already owns a component of that type.
+    fn archetypeOnTypeAdded(self: *World, entity: *Entity, tid: u32) !void {
+        const bit = signatureBit(tid);
+        if (entity.signature & bit != 0) return;
+        try self.archetypes.move(self.allocator, self, entity, entity.signature | bit);
+    }
+
+    //Narrows `entity`'s signature if it no longer owns any component of `tid`
+    //(entities can own several components of one type, so removal of one
+    //doesn't necessarily clear the bit).
+    fn archetypeOnTypeMaybeRemoved(self: *World, entity: *Entity, tid: u32) !void {
+        const bit = signatureBit(tid);
+        if (entity.signature & bit == 0) return;
+        if (entity.ownsType(tid)) return;
+        try self.archetypes.move(self.allocator, self, entity, entity.signature & ~bit);
+    }
+
     //Queues a structural event and invokes matching observers. Called from
     //entity/component lifecycle code whenever a change is committed.
     fn signalEntitySpawned(self: *World, entity: *Entity) void {
@@ -1023,6 +1139,7 @@ pub const World = struct {
         self.resources.deinit(self.allocator);
         self.events.deinit(self.allocator);
         self.observers.deinit(self.allocator);
+        self.archetypes.deinit(self.allocator);
         var i: usize = 0;
         while (i < self.components_len) : (i += 1)
             self.allocator.free(self._components[i].sparse);
@@ -1267,12 +1384,21 @@ pub const Component = struct {
 
     //Removes this component from every owning entity's reverse index and then
     //clears the owner set, keeping the entity->component and component->entity
-    //views consistent whenever a component is detached or destroyed.
+    //views consistent whenever a component is detached or destroyed. Each
+    //affected entity's archetype signature is narrowed if this was its last
+    //component of the type. (OOM during the archetype move is fatal: the index
+    //must stay exact, and the c_allocator failing is unrecoverable anyway.)
     fn releaseOwners(self: *Component, world: *World) void {
         if (self.owners.len > 0) {
-            if (resolveGlobalId(world, self.owners.first)) |e| e.owned.remove(self);
+            if (resolveGlobalId(world, self.owners.first)) |e| {
+                e.owned.remove(self);
+                if (self.typeId) |tid| world.archetypeOnTypeMaybeRemoved(e, tid) catch unreachable;
+            }
             for (self.owners.rest.items) |gid| {
-                if (resolveGlobalId(world, gid)) |e| e.owned.remove(self);
+                if (resolveGlobalId(world, gid)) |e| {
+                    e.owned.remove(self);
+                    if (self.typeId) |tid| world.archetypeOnTypeMaybeRemoved(e, tid) catch unreachable;
+                }
             }
         }
         self.owners.clear(world.allocator);
@@ -1290,7 +1416,9 @@ pub const Component = struct {
         const world = @as(*World, @ptrCast(@alignCast(self.world)));
 
         if (!self.alive and self.magic == MAGIC and self.allocated) {
-            opaqueDestroy(world.allocator, self.data.?, types_size[@as(usize, @intCast(self.typeId.?))], types_align[@as(usize, @intCast(self.typeId.?))]);
+            if (self.data) |data| {
+                opaqueDestroy(world.allocator, data, types_size[@as(usize, @intCast(self.typeId.?))], types_align[@as(usize, @intCast(self.typeId.?))]);
+            }
             self.allocated = false;
         }
     }
@@ -1324,6 +1452,9 @@ pub const Entity = struct {
     world: ?*anyopaque,
     allocated: bool = false,
     owned: OwnedComponents = .{}, //reverse index of components this entity owns
+    signature: Signature = 0, //bitmask of component types this entity owns
+    archetype: u32 = Archetypes.nil, //index into world.archetypes.list
+    archetype_row: u32 = 0, //position within that archetype's entity list
 
     //Returns a stable handle that can be stored and later validated with
     //`world.entities.resolve`/`isValid`, even after this slot is recycled.
@@ -1344,24 +1475,30 @@ pub const Entity = struct {
 
     //Runtime (type-id) variant of getOneComponent, used by the C API.
     //
-    //Scans for a live component of `filter_type` owned by this entity. Ownership
-    //is keyed by global entity id, so it is exact across multiple entity chunks.
+    //Walks this entity's reverse index (`owned`), so lookup is O(owned
+    //components) instead of scanning every component slot in the world. The
+    //index is exact: attach adds, detach/destroy remove, and Entity.destroy
+    //clears it before the slot can be recycled.
     pub inline fn getOneComponentById(ctx: *Entity, filter_type: u32) ?*Component {
-        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        const gid = entityGlobalId(ctx);
-        var ci: usize = 0;
-        while (ci < world.components_len) : (ci += 1) {
-            const chunk = &world._components[ci];
-            var si: usize = 0;
-            while (si < CHUNK_SIZE) : (si += 1) {
-                const component = &chunk.sparse[si];
-                if (!component.alive) continue;
-                const tid = component.typeId orelse continue;
-                if (tid == filter_type and component.owners.contains(gid))
-                    return component;
-            }
+        var k: u32 = 0;
+        while (k < ctx.owned.len) : (k += 1) {
+            const component = ctx.owned.at(k);
+            if (!component.alive) continue;
+            const tid = component.typeId orelse continue;
+            if (tid == filter_type) return component;
         }
         return null;
+    }
+
+    //True if this entity owns at least one live component of type id `tid`.
+    pub inline fn ownsType(self: *const Entity, tid: u32) bool {
+        var k: u32 = 0;
+        while (k < self.owned.len) : (k += 1) {
+            const component = self.owned.at(k);
+            if (!component.alive) continue;
+            if (component.typeId) |t| if (t == tid) return true;
+        }
+        return false;
     }
 
     //Returns true if this entity owns at least one component of the given type.
@@ -1426,7 +1563,10 @@ pub const Entity = struct {
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
         try component.owners.add(world.allocator, entityGlobalId(self));
         try self.owned.add(world.allocator, component);
-        if (component.typeId) |tid| world.signalComponentAdded(self, component, tid);
+        if (component.typeId) |tid| {
+            try world.archetypeOnTypeAdded(self, tid);
+            world.signalComponentAdded(self, component, tid);
+        }
     }
 
     pub fn attach_c(self: *Entity, component: *Component, comp_type: *c_type) !void {
@@ -1459,7 +1599,10 @@ pub const Entity = struct {
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, true);
         try component.owners.add(world.allocator, entityGlobalId(self));
         try self.owned.add(world.allocator, component);
-        if (component.typeId) |tid| world.signalComponentAdded(self, component, tid);
+        if (component.typeId) |tid| {
+            try world.archetypeOnTypeAdded(self, tid);
+            world.signalComponentAdded(self, component, tid);
+        }
     }
 
     pub inline fn detach(self: *Entity, component: *Component) !void {
@@ -1469,7 +1612,10 @@ pub const Entity = struct {
         component.owners.remove(entityGlobalId(self));
         self.owned.remove(component);
         world._entities[self.chunk].component_mask[@as(usize, @intCast(component.typeId.?))].setValue(component.id, false);
-        if (component.typeId) |tid| world.signalComponentRemoved(self, component, tid);
+        if (component.typeId) |tid| {
+            try world.archetypeOnTypeMaybeRemoved(self, tid);
+            world.signalComponentRemoved(self, component, tid);
+        }
     }
 
     pub inline fn destroy(self: *Entity) void {
@@ -1493,6 +1639,10 @@ pub const Entity = struct {
                 component.destroy();
         }
         self.owned.clear(world.allocator);
+
+        //Drop out of the archetype index before the slot can be recycled.
+        world.archetypes.remove(world, self);
+        self.signature = 0;
 
         world.signalEntityDestroyed(self);
         self.alive = false;
@@ -1531,6 +1681,9 @@ pub fn typeToId(comptime T: type) u32 {
         }
     }
     if (!found) {
+        //Registering past the cap would write out of bounds and produce type
+        //ids that don't fit in a Signature; fail loudly instead.
+        std.debug.assert(type_idx < MAX_COMPONENTS);
         types[type_idx] = longId;
         types_size[type_idx] = @sizeOf(T);
         types_align[type_idx] = @alignOf(T);
@@ -1551,6 +1704,7 @@ pub fn typeToIdC(comp_type: c_type) u32 {
         }
     }
     if (!found) {
+        std.debug.assert(type_idx < MAX_COMPONENTS);
         types[type_idx] = longId;
         types_size[type_idx] = comp_type.size;
         types_align[type_idx] = comp_type.alignof;
@@ -1611,6 +1765,9 @@ pub const SuperEntities = struct {
             e.alive = false;
             e.generation = 0;
             e.owned = .{};
+            e.signature = 0;
+            e.archetype = Archetypes.nil;
+            e.archetype_row = 0;
         }
 
         var i: usize = 0;
@@ -1715,76 +1872,60 @@ pub const SuperEntities = struct {
     //Multi-component query: yields entities that own a component of every
     //`include` type and none of the `exclude` types.
     //
-    //This is a linear (non-archetype) scan: each candidate entity is tested
-    //with `Entity.hasById` per filter type, so cost scales with
-    //entities * filter_types * components. Fine for modest worlds; an
-    //archetype/cached implementation is a future optimization.
+    //Archetype-backed: candidate archetypes are matched with two mask ops on
+    //their signature, then only the entities inside matching archetypes are
+    //visited. Cost scales with archetype count + matching entities, not
+    //world size * filter types.
+    //
+    //Structural changes (attach/detach/destroy) move entities between
+    //archetypes mid-iteration and can skip or repeat entities; defer such
+    //changes with a CommandBuffer while a query is live.
     pub const QueryIterator = struct {
-        ctx: *[]Entities,
         world: *World,
-        total: usize = 0,
-        index: usize = 0,
-        include_ids: [MAX_COMPONENTS]u32 = undefined,
-        include_len: usize = 0,
-        exclude_ids: [MAX_COMPONENTS]u32 = undefined,
-        exclude_len: usize = 0,
+        include_mask: Signature = 0,
+        exclude_mask: Signature = 0,
+        arch_index: usize = 0,
+        row: usize = 0,
 
         pub fn next(it: *QueryIterator) ?*Entity {
-            while (it.index < it.total) : (it.index += 1) {
-                const mod = it.index / CHUNK_SIZE;
-                const rem = @rem(it.index, CHUNK_SIZE);
-                const entity = &it.ctx.*[mod].sparse[rem];
-                if (!entity.alive) continue;
-
-                var match = true;
-                for (it.include_ids[0..it.include_len]) |tid| {
-                    if (!entity.hasById(tid)) {
-                        match = false;
-                        break;
-                    }
+            const archetypes = it.world.archetypes.list.items;
+            while (it.arch_index < archetypes.len) {
+                const arch = &archetypes[it.arch_index];
+                if ((arch.signature & it.include_mask) != it.include_mask or
+                    (arch.signature & it.exclude_mask) != 0)
+                {
+                    it.arch_index += 1;
+                    it.row = 0;
+                    continue;
                 }
-                if (match) {
-                    for (it.exclude_ids[0..it.exclude_len]) |tid| {
-                        if (entity.hasById(tid)) {
-                            match = false;
-                            break;
-                        }
-                    }
+                while (it.row < arch.entities.items.len) {
+                    const gid = arch.entities.items[it.row];
+                    it.row += 1;
+                    if (resolveGlobalId(it.world, gid)) |entity| return entity;
                 }
-                if (match) {
-                    it.index += 1;
-                    return entity;
-                }
+                it.arch_index += 1;
+                it.row = 0;
             }
 
             return null;
         }
     };
 
-    fn newQuery(ctx: *SuperEntities) SuperEntities.QueryIterator {
-        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        return .{ .ctx = &world._entities, .world = world, .total = CHUNK_SIZE * world.entities_len };
-    }
-
     //Query entities owning a component of every type in the `include` tuple,
-    //e.g. `world.entities.query(.{ Apple, Orange })`.
+    //e.g. `world.entities.query(.{ Apple, Orange })`. An empty tuple matches
+    //every live entity.
     pub fn query(ctx: *SuperEntities, comptime include: anytype) SuperEntities.QueryIterator {
-        var it = ctx.newQuery();
-        inline for (include) |T| {
-            it.include_ids[it.include_len] = typeToId(T);
-            it.include_len += 1;
-        }
-        return it;
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        var mask: Signature = 0;
+        inline for (include) |T| mask |= signatureBit(typeToId(T));
+        return .{ .world = world, .include_mask = mask };
     }
 
     //As `query`, but also excludes entities owning any type in `exclude`,
     //e.g. `world.entities.queryExclude(.{ Apple }, .{ Orange })`.
     pub fn queryExclude(ctx: *SuperEntities, comptime include: anytype, comptime exclude: anytype) SuperEntities.QueryIterator {
         var it = ctx.query(include);
-        inline for (exclude) |T| {
-            it.exclude_ids[it.exclude_len] = typeToId(T);
-            it.exclude_len += 1;
-        }
+        inline for (exclude) |T| it.exclude_mask |= signatureBit(typeToId(T));
         return it;
     }
 };
@@ -1822,11 +1963,17 @@ const Entities = struct {
         entity.alive = true;
         entity.world = ctx.world;
         entity.chunk = entities_idx;
+        entity.signature = 0;
+        entity.archetype = Archetypes.nil;
+        entity.archetype_row = 0;
 
         ctx.alive += 1;
         ctx.free_idx += 1;
 
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        //Component-less entities live in the signature-0 archetype so that
+        //every live entity is reachable through the archetype index.
+        try world.archetypes.insert(world.allocator, entity, 0);
         world.signalEntitySpawned(entity);
 
         return entity;
@@ -2507,6 +2654,130 @@ test "observers fire synchronously on component attach" {
     const e = try world.entities.create();
     _ = try e.addComponent(A{ .v = 1 });
     try std.testing.expectEqual(@as(u32, 1), O.count);
+}
+
+test "archetype index groups entities by signature" {
+    const A = struct { v: u32 = 0 };
+    const B = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    const e1 = try world.entities.create(); // stays {}
+    const e2 = try world.entities.create(); // -> {A}
+    const e3 = try world.entities.create(); // -> {A,B}
+
+    _ = try e2.addComponent(A{});
+    _ = try e3.addComponent(A{});
+    _ = try e3.addComponent(B{});
+
+    // Three occupied archetypes: {}, {A}, {A,B}.
+    try std.testing.expectEqual(@as(usize, 3), world.archetypes.count());
+    try std.testing.expectEqual(@as(Signature, 0), e1.signature);
+    try std.testing.expectEqual(signatureBit(typeToId(A)), e2.signature);
+    try std.testing.expectEqual(signatureBit(typeToId(A)) | signatureBit(typeToId(B)), e3.signature);
+
+    // Include+exclude resolves purely through archetype signatures.
+    var only_a: usize = 0;
+    var q = world.entities.queryExclude(.{A}, .{B});
+    while (q.next()) |e| {
+        try std.testing.expectEqual(e2, e);
+        only_a += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), only_a);
+
+    // Removing B moves e3 back into e2's archetype.
+    try e3.remove(B);
+    try std.testing.expectEqual(e2.signature, e3.signature);
+    try std.testing.expectEqual(e2.archetype, e3.archetype);
+}
+
+test "archetype swap-remove keeps rows consistent across destroys" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    var es: [4]*Entity = undefined;
+    for (0..4) |i| {
+        es[i] = try world.entities.create();
+        _ = try es[i].addComponent(A{ .v = @intCast(i) });
+    }
+
+    // Destroying row 0 swap-moves the last entity into its place; the moved
+    // entity's row index must be fixed up or later removals corrupt the list.
+    es[0].destroy();
+    es[3].destroy();
+
+    var seen: usize = 0;
+    var q = world.entities.query(.{A});
+    while (q.next()) |e| {
+        try std.testing.expect(e.alive);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), seen);
+}
+
+test "signature bit persists while entity owns multiple components of one type" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    const e = try world.entities.create();
+    const c1 = try e.addComponent(A{ .v = 1 });
+    const c2 = try e.addComponent(A{ .v = 2 });
+    try std.testing.expect(e.signature & signatureBit(typeToId(A)) != 0);
+
+    // Still owns c2 of type A: the bit must remain set.
+    try e.detach(c1);
+    try std.testing.expect(e.has(A));
+    try std.testing.expect(e.signature & signatureBit(typeToId(A)) != 0);
+
+    // Last one gone: signature narrows back to empty.
+    try e.detach(c2);
+    try std.testing.expect(!e.has(A));
+    try std.testing.expectEqual(@as(Signature, 0), e.signature);
+}
+
+test "empty query yields every live entity via the archetype index" {
+    var world = try World.create();
+    defer world.destroy();
+
+    const n = 5;
+    var es: [n]*Entity = undefined;
+    for (0..n) |i| es[i] = try world.entities.create();
+    es[1].destroy();
+
+    var seen: usize = 0;
+    var q = world.entities.query(.{});
+    while (q.next()) |_| seen += 1;
+    try std.testing.expectEqual(@as(usize, n - 1), seen);
+}
+
+test "component destroy narrows owning entities' archetypes" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    const e1 = try world.entities.create();
+    const e2 = try world.entities.create();
+    const c = try world.components.create(A);
+    try e1.attach(c, A{ .v = 1 });
+    try e2.attach(c, A{ .v = 1 });
+    try std.testing.expect(e1.signature != 0);
+    try std.testing.expect(e2.signature != 0);
+
+    // Destroying the shared component must narrow BOTH owners back to {}.
+    c.destroy();
+    try std.testing.expectEqual(@as(Signature, 0), e1.signature);
+    try std.testing.expectEqual(@as(Signature, 0), e2.signature);
+
+    var seen: usize = 0;
+    var q = world.entities.query(.{A});
+    while (q.next()) |_| seen += 1;
+    try std.testing.expectEqual(@as(usize, 0), seen);
 }
 
 test "structural events queue lifecycle changes" {

@@ -185,7 +185,8 @@ while ((next = coyote_entities_iterator_filter_next(it)) != 0) {
     // Work with the entity
 }
 
-// Multi-component query (AND)
+// Multi-component query (AND) - archetype-backed: matches groups of entities
+// sharing a component signature instead of probing each entity per type.
 const coyote_type include[] = { t_position, t_velocity };
 iterator q = coyote_entities_query(world, include, 2, NULL, 0);
 while ((next = coyote_entities_query_next(q)) != 0) {
@@ -193,6 +194,10 @@ while ((next = coyote_entities_query_next(q)) != 0) {
     void* vel = coyote_entity_get(next, t_velocity);
     (void)pos; (void)vel;
 }
+
+// Archetype introspection
+printf("archetypes: %d\n", coyote_archetypes_count(world));
+printf("signature:  %u\n", coyote_entity_signature(e));
 ```
 
 ## Entity Handles and Accessors

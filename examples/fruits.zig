@@ -99,17 +99,12 @@ pub fn main() !void {
     combo.destroy();
     world.components.gc();
 
-    //Create 50k entities and attach 50k unique components
-    var i: usize = 0;
-    while (i < 50000) : (i += 1) {
-        const anEntity = try world.entities.create();
-        const anOrangeComponent = try world.components.create(Components.Orange);
-        try anEntity.attach(anOrangeComponent, Components.Orange{ .color = 1, .ripe = false, .harvested = false });
-    }
+    //Create 50k entities with Orange components via batch spawn
+    try world.entities.createBatchUniform(Components.Orange, 50000, .{ .color = 1, .ripe = false, .harvested = false });
 
     //Filter components by type
+    var i: usize = 0;
     var it = world.components.iteratorFilter(Components.Orange);
-    i = 0;
     while (it.next()) |_| : (i += 1) {
         //...
     }
@@ -202,44 +197,55 @@ pub fn DrainEvents(ctx: *SystemContext) anyerror!void {
 }
 
 pub fn Grow(world: *World) void {
-    var it = world.components.iterator();
+    const setRipeOrange = struct {
+        fn set(c: *Components.Orange) void {
+            c.ripe = true;
+        }
+    }.set;
+    const setRipeApple = struct {
+        fn set(c: *Components.Apple) void {
+            c.ripe = true;
+        }
+    }.set;
+    const setRipePear = struct {
+        fn set(c: *Components.Pear) void {
+            c.ripe = true;
+        }
+    }.set;
+
+    var qv_orange = world.entities.queryViewSimd(.{Components.Orange});
+    qv_orange.processColumn(Components.Orange, setRipeOrange);
+    var qv_apple = world.entities.queryViewSimd(.{Components.Apple});
+    qv_apple.processColumn(Components.Apple, setRipeApple);
+    var qv_pear = world.entities.queryViewSimd(.{Components.Pear});
+    qv_pear.processColumn(Components.Pear, setRipePear);
+
     var i: u32 = 0;
+    var it = world.components.iterator();
     while (it.next()) |component| : (i += 1) {
-        if (component.is(Components.Orange)) {
-            try component.set(Components.Orange, .{ .ripe = true });
-        }
-
-        if (component.is(Components.Apple)) {
-            try component.set(Components.Apple, .{ .ripe = true });
-        }
-
-        if (component.is(Components.Pear)) {
-            try component.set(Components.Pear, .{ .ripe = true });
-        }
-        //Fruits fall from the tree
         component.detach();
     }
     std.log.info("Fruits grown: {}", .{i});
 }
 
 pub fn Harvest(world: *World) void {
-    var it = world.components.iterator();
     var i: u32 = 0;
+    var it = world.components.iterator();
     while (it.next()) |component| {
         if (component.is(Components.Orange)) {
-            if (Cast(Components.Orange, component).ripe == true) {
+            if (Cast(Components.Orange, component).ripe) {
                 try component.set(Components.Orange, .{ .harvested = true });
                 i += 1;
             }
         }
         if (component.is(Components.Apple)) {
-            if (Cast(Components.Apple, component).ripe == true) {
+            if (Cast(Components.Apple, component).ripe) {
                 try component.set(Components.Apple, .{ .harvested = true });
                 i += 1;
             }
         }
         if (component.is(Components.Pear)) {
-            if (Cast(Components.Pear, component).ripe == true) {
+            if (Cast(Components.Pear, component).ripe) {
                 try component.set(Components.Pear, .{ .harvested = true });
                 i += 1;
             }

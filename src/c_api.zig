@@ -204,9 +204,11 @@ export fn coyote_components_iterator_next(iterator_ptr: usize) usize {
 
 export fn coyote_components_iterator_filter(world_ptr: usize, c_type: coyote.c_type) usize {
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
-    const components = &world._components;
     const iterator = coyote.allocator.create(coyote.SuperComponents.MaskedIterator) catch unreachable;
-    iterator.* = coyote.SuperComponents.MaskedIterator{ .ctx = components, .filter_type = world.typeIdC(c_type), .alive = coyote.CHUNK_SIZE * world.components_len, .world = world };
+    iterator.* = coyote.SuperComponents.MaskedIterator{
+        .world = world,
+        .filter_type = world.typeIdC(c_type),
+    };
     return @intFromPtr(iterator);
 }
 
@@ -240,6 +242,20 @@ export fn coyote_entities_iterator_next(iterator_ptr: usize) usize {
 export fn coyote_entities_query(world_ptr: usize, include: [*c]const coyote.c_type, include_n: usize, exclude: [*c]const coyote.c_type, exclude_n: usize) usize {
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
     const iterator = coyote.allocator.create(coyote.SuperEntities.QueryIterator) catch unreachable;
+    iterator.* = .{ .world = world };
+
+    // Prefer stack storage on the iterator (no type-id heap dupes) when filters fit.
+    if (include_n <= iterator.include_storage.len and exclude_n <= iterator.exclude_storage.len) {
+        var i: usize = 0;
+        while (i < include_n) : (i += 1) iterator.include_storage[i] = world.typeIdC(include[i]);
+        i = 0;
+        while (i < exclude_n) : (i += 1) iterator.exclude_storage[i] = world.typeIdC(exclude[i]);
+        if (include_n > 0) std.mem.sort(u32, iterator.include_storage[0..include_n], {}, std.sort.asc(u32));
+        if (exclude_n > 0) std.mem.sort(u32, iterator.exclude_storage[0..exclude_n], {}, std.sort.asc(u32));
+        iterator.include = iterator.include_storage[0..include_n];
+        iterator.exclude = iterator.exclude_storage[0..exclude_n];
+        return @intFromPtr(iterator);
+    }
 
     var include_ids = coyote.allocator.alloc(u32, include_n) catch unreachable;
     var exclude_ids = coyote.allocator.alloc(u32, exclude_n) catch unreachable;
@@ -253,6 +269,206 @@ export fn coyote_entities_query(world_ptr: usize, include: [*c]const coyote.c_ty
     coyote.allocator.free(exclude_ids);
 
     return @intFromPtr(iterator);
+}
+
+const CoyoteForeachFn = *const fn (entity: usize, comps: [*c]?*anyopaque, n: usize, user_data: ?*anyopaque) callconv(.c) void;
+const CoyoteForeachColumnsFn = *const fn (columns: [*c]?*anyopaque, row_count: usize, n_types: usize, user_data: ?*anyopaque) callconv(.c) void;
+
+/// Zero-alloc archetype walk: callback receives SoA column pointers for each include type.
+export fn coyote_entities_foreach(
+    world_ptr: usize,
+    include: [*c]const coyote.c_type,
+    include_n: usize,
+    exclude: [*c]const coyote.c_type,
+    exclude_n: usize,
+    cb: ?CoyoteForeachFn,
+    user_data: ?*anyopaque,
+) c_int {
+    if (world_ptr == 0 or cb == null) return 1;
+    if (include_n > 16 or exclude_n > 16) return 1;
+
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    var include_ids: [16]u32 = undefined;
+    var exclude_ids: [16]u32 = undefined;
+    var i: usize = 0;
+    while (i < include_n) : (i += 1) include_ids[i] = world.typeIdC(include[i]);
+    i = 0;
+    while (i < exclude_n) : (i += 1) exclude_ids[i] = world.typeIdC(exclude[i]);
+    if (include_n > 1) std.mem.sort(u32, include_ids[0..include_n], {}, std.sort.asc(u32));
+    if (exclude_n > 1) std.mem.sort(u32, exclude_ids[0..exclude_n], {}, std.sort.asc(u32));
+
+    // Map sorted include ids back to the caller's include order for comps[].
+    var caller_tids: [16]u32 = undefined;
+    i = 0;
+    while (i < include_n) : (i += 1) caller_tids[i] = world.typeIdC(include[i]);
+
+    const include_slice = include_ids[0..include_n];
+    const exclude_slice = exclude_ids[0..exclude_n];
+    const callback = cb.?;
+
+    for (world.archetypes.active.items) |arch_idx| {
+        const arch = &world.archetypes.list.items[arch_idx];
+        if (!arch.signature.matches(include_slice, exclude_slice)) continue;
+
+        var col_idxs: [16]?usize = @splat(null);
+        i = 0;
+        while (i < include_n) : (i += 1) {
+            col_idxs[i] = coyote.Archetypes.columnIndex(arch, caller_tids[i]);
+        }
+
+        var row: usize = 0;
+        while (row < arch.entities.items.len) : (row += 1) {
+            const gid = arch.entities.items[row];
+            const entity = coyote.resolveGlobalId(world, gid) orelse continue;
+
+            var comps: [16]?*anyopaque = @splat(null);
+            i = 0;
+            while (i < include_n) : (i += 1) {
+                if (col_idxs[i]) |ci| {
+                    comps[i] = arch.columns.items[ci].rowPtr(row);
+                }
+            }
+            callback(@intFromPtr(entity), &comps, include_n, user_data);
+        }
+    }
+    return 0;
+}
+
+/// Column-chunk walk: one callback per matching archetype with SoA base pointers.
+/// Does not call resolveGlobalId (component-only systems).
+export fn coyote_entities_foreach_columns(
+    world_ptr: usize,
+    include: [*c]const coyote.c_type,
+    include_n: usize,
+    exclude: [*c]const coyote.c_type,
+    exclude_n: usize,
+    cb: ?CoyoteForeachColumnsFn,
+    user_data: ?*anyopaque,
+) c_int {
+    if (world_ptr == 0 or cb == null) return 1;
+    if (include_n > 16 or exclude_n > 16) return 1;
+
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    var include_ids: [16]u32 = undefined;
+    var exclude_ids: [16]u32 = undefined;
+    var caller_tids: [16]u32 = undefined;
+    var i: usize = 0;
+    while (i < include_n) : (i += 1) {
+        include_ids[i] = world.typeIdC(include[i]);
+        caller_tids[i] = include_ids[i];
+    }
+    i = 0;
+    while (i < exclude_n) : (i += 1) exclude_ids[i] = world.typeIdC(exclude[i]);
+    if (include_n > 1) std.mem.sort(u32, include_ids[0..include_n], {}, std.sort.asc(u32));
+    if (exclude_n > 1) std.mem.sort(u32, exclude_ids[0..exclude_n], {}, std.sort.asc(u32));
+
+    const include_slice = include_ids[0..include_n];
+    const exclude_slice = exclude_ids[0..exclude_n];
+    const callback = cb.?;
+
+    for (world.archetypes.active.items) |arch_idx| {
+        const arch = &world.archetypes.list.items[arch_idx];
+        if (!arch.signature.matches(include_slice, exclude_slice)) continue;
+
+        const rows = arch.entities.items.len;
+        if (rows == 0) continue;
+
+        var columns: [16]?*anyopaque = @splat(null);
+        var missing = false;
+        i = 0;
+        while (i < include_n) : (i += 1) {
+            const ci = coyote.Archetypes.columnIndex(arch, caller_tids[i]) orelse {
+                missing = true;
+                break;
+            };
+            const col = &arch.columns.items[ci];
+            if (col.elem_size == 0) {
+                columns[i] = @ptrFromInt(1);
+            } else if (col.capacity == 0) {
+                missing = true;
+                break;
+            } else {
+                columns[i] = col.data.ptr;
+            }
+        }
+        if (missing) continue;
+
+        callback(&columns, rows, include_n, user_data);
+    }
+    return 0;
+}
+
+/// Cached query handle: create once (e.g. system init), run each frame.
+export fn coyote_query_create(
+    world_ptr: usize,
+    include: [*c]const coyote.c_type,
+    include_n: usize,
+    exclude: [*c]const coyote.c_type,
+    exclude_n: usize,
+) usize {
+    if (world_ptr == 0) return 0;
+    if (include_n > 16 or exclude_n > 16) return 0;
+    if (include_n == 0) return 0;
+
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    var include_ids: [16]u32 = undefined;
+    var exclude_ids: [16]u32 = undefined;
+    var caller_tids: [16]u32 = undefined;
+    var i: usize = 0;
+    while (i < include_n) : (i += 1) {
+        include_ids[i] = world.typeIdC(include[i]);
+        caller_tids[i] = include_ids[i];
+    }
+    i = 0;
+    while (i < exclude_n) : (i += 1) exclude_ids[i] = world.typeIdC(exclude[i]);
+
+    const q = coyote.CachedQuery.create(
+        world,
+        include_ids[0..include_n],
+        exclude_ids[0..exclude_n],
+        caller_tids[0..include_n],
+    ) catch return 0;
+    return @intFromPtr(q);
+}
+
+export fn coyote_query_destroy(query_ptr: usize) void {
+    if (query_ptr == 0) return;
+    const q = @as(*coyote.CachedQuery, @ptrFromInt(query_ptr));
+    q.destroy();
+}
+
+export fn coyote_query_run_columns(
+    query_ptr: usize,
+    cb: ?CoyoteForeachColumnsFn,
+    user_data: ?*anyopaque,
+) c_int {
+    if (query_ptr == 0 or cb == null) return 1;
+    const q = @as(*coyote.CachedQuery, @ptrFromInt(query_ptr));
+    q.runColumns(cb.?, user_data);
+    return 0;
+}
+
+/// SIMD Position+Velocity integrate via a cached query (include must be [position, velocity]).
+export fn coyote_query_integrate_position2d(query_ptr: usize, dt: f32) c_int {
+    if (query_ptr == 0) return 1;
+    const q = @as(*coyote.CachedQuery, @ptrFromInt(query_ptr));
+    q.integratePosition2D(dt);
+    return 0;
+}
+
+/// SIMD Position+Velocity integrate for `{x:f32,y:f32}` component layouts.
+export fn coyote_integrate_position2d(
+    world_ptr: usize,
+    position: coyote.c_type,
+    velocity: coyote.c_type,
+    dt: f32,
+) c_int {
+    if (world_ptr == 0) return 1;
+    const world = @as(*coyote.World, @ptrFromInt(world_ptr));
+    const pos_tid = world.typeIdC(position);
+    const vel_tid = world.typeIdC(velocity);
+    coyote.SimdSystems.integratePosition2DByTypeId(world, pos_tid, vel_tid, dt);
+    return 0;
 }
 
 //Number of archetypes (distinct component-type signatures) currently holding
@@ -298,9 +514,11 @@ export fn coyote_entities_query_next(iterator_ptr: usize) usize {
 
 export fn coyote_entities_iterator_filter(world_ptr: usize, c_type: coyote.c_type) usize {
     const world = @as(*coyote.World, @ptrFromInt(world_ptr));
-    const entities = &world._entities;
     const iterator = coyote.allocator.create(coyote.SuperEntities.MaskedIterator) catch unreachable;
-    iterator.* = coyote.SuperEntities.MaskedIterator{ .ctx = entities, .filter_type = world.typeIdC(c_type), .alive = coyote.CHUNK_SIZE * world.components_len, .world = world };
+    iterator.* = coyote.SuperEntities.MaskedIterator{
+        .world = world,
+        .filter_type = world.typeIdC(c_type),
+    };
     return @intFromPtr(iterator);
 }
 

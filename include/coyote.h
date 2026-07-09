@@ -11,14 +11,18 @@ extern "C" {
 typedef struct coyote_type {
     uintptr_t id;
     uintptr_t size;        // component sizeof
-    uint8_t alignof;       // component alignment (must match Zig c_type ABI)
+    uint8_t alignment;     // component alignment (must match Zig c_type ABI)
     const char* name;      // component name
 } coyote_type;
 
-// Portable (C99) alignment query via the classic offsetof trick.
+// Portable alignment query: C++ alignof, C99 offsetof trick.
+#ifdef __cplusplus
+#define COYOTE_ALIGNOF(TypeName) alignof(TypeName)
+#else
 #define COYOTE_ALIGNOF(TypeName) offsetof(struct { char coyote_pad; TypeName coyote_val; }, coyote_val)
+#endif
 
-#define COYOTE_MAKE_TYPE(TypeId, TypeName) { .id = TypeId, .size = sizeof(TypeName), .alignof = (uint8_t)COYOTE_ALIGNOF(TypeName), .name = #TypeName }
+#define COYOTE_MAKE_TYPE(TypeId, TypeName) { .id = TypeId, .size = sizeof(TypeName), .alignment = (uint8_t)COYOTE_ALIGNOF(TypeName), .name = #TypeName }
 
 typedef uintptr_t entity;
 typedef uintptr_t component;
@@ -46,13 +50,44 @@ int coyote_components_iterator(world world, iterator iterator);
 component coyote_components_iterator_next(iterator iterator);
 int coyote_component_is(component component, coyote_type type);
 iterator coyote_components_iterator_filter(world world, coyote_type type);
-iterator coyote_components_entities_filter(world world, coyote_type type);
 component coyote_components_iterator_filter_next(iterator iterator);
+iterator coyote_entities_iterator_filter(world world, coyote_type type);
 entity coyote_entities_iterator_filter_next(iterator iterator);
 iterator coyote_components_iterator_filter_range(world world, coyote_type type, size_t start_idx, size_t end_idx);
 component coyote_components_iterator_filter_range_next(iterator iterator);
 iterator coyote_entities_query(world world, const coyote_type* include, size_t include_n, const coyote_type* exclude, size_t exclude_n);
 entity coyote_entities_query_next(iterator iterator);
+
+// Zero-alloc archetype walk: for each matching entity, invokes `fn` with
+// SoA column pointers for each include type (comps[i] for include[i]).
+// Returns 0 on success, non-zero on invalid args (e.g. include_n > 16).
+typedef void (*coyote_foreach_fn)(entity e, void** comps, size_t n, void* user_data);
+int coyote_entities_foreach(world world, const coyote_type* include, size_t include_n,
+                            const coyote_type* exclude, size_t exclude_n,
+                            coyote_foreach_fn fn, void* user_data);
+
+// Column-chunk walk: callback once per matching archetype with SoA column base
+// pointers (columns[i] for include[i]) and the dense row count. No per-row
+// entity resolution and no per-row C callback. Returns 0 on success.
+typedef void (*coyote_foreach_columns_fn)(void** columns, size_t row_count, size_t n_types, void* user_data);
+int coyote_entities_foreach_columns(world world, const coyote_type* include, size_t include_n,
+                                    const coyote_type* exclude, size_t exclude_n,
+                                    coyote_foreach_columns_fn fn, void* user_data);
+
+// Cached query handles: create once (system init), run each frame. Skips
+// per-frame type-id sorting, archetype signature matching, and columnIndex.
+// Matching list refreshes when new archetype tables appear.
+typedef uintptr_t coyote_query;
+coyote_query coyote_query_create(world world, const coyote_type* include, size_t include_n,
+                                 const coyote_type* exclude, size_t exclude_n);
+void coyote_query_destroy(coyote_query query);
+int coyote_query_run_columns(coyote_query query, coyote_foreach_columns_fn fn, void* user_data);
+// SIMD integrate via cached query; include order must be [position, velocity].
+int coyote_query_integrate_position2d(coyote_query query, float dt);
+
+// SIMD Position+Velocity integrate for `{x:f32,y:f32}` layouts (both types).
+// Walks matching archetype columns without resolveGlobalId. Returns 0 on success.
+int coyote_integrate_position2d(world world, coyote_type position, coyote_type velocity, float dt);
 // Archetype / type registry introspection
 int coyote_archetypes_count(world world);
 int coyote_types_count(world world);

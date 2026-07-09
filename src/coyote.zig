@@ -38,7 +38,7 @@ pub const TypeRegistry = struct {
         const key = ct.id;
         if (self.c_lookup.get(key)) |id| return id;
         const id: u32 = @intCast(self.entries.items.len);
-        try self.entries.append(alloc, .{ .key = key, .size = ct.size, .alignment = ct.alignof });
+        try self.entries.append(alloc, .{ .key = key, .size = ct.size, .alignment = ct.alignment });
         try self.c_lookup.put(alloc, key, id);
         return id;
     }
@@ -138,7 +138,7 @@ pub const TypeSignature = struct {
 pub const c_type = extern struct {
     id: usize = 0,
     size: usize = 0,
-    alignof: u8 = 8,
+    alignment: u8 = 8,
     name: [*c]u8 = null,
 };
 
@@ -266,26 +266,30 @@ pub const SuperComponents = struct {
     };
 
     pub const MaskedIterator = struct {
-        ctx: *[]_Components,
-        index: usize = 0,
-        filter_type: u32,
-        alive: usize = 0,
         world: *World,
+        filter_type: u32,
+        arch_index: usize = 0,
+        row: usize = 0,
 
         pub fn next(it: *MaskedIterator) ?*Component {
-            while (it.index < it.alive) : (it.index += 1) {
-                const mod = it.index / CHUNK_SIZE;
-                const rem = @rem(it.index, CHUNK_SIZE);
-                const component = &it.ctx.*[mod].sparse[rem];
-                if (!component.alive) continue;
-                if (component.typeId) |tid| {
-                    if (tid == it.filter_type) {
-                        it.index += 1;
-                        return component;
+            const active = it.world.archetypes.active.items;
+            while (it.arch_index < active.len) {
+                const arch = &it.world.archetypes.list.items[active[it.arch_index]];
+                if (!arch.signature.contains(it.filter_type)) {
+                    it.arch_index += 1;
+                    it.row = 0;
+                    continue;
+                }
+                while (it.row < arch.entities.items.len) {
+                    const gid = arch.entities.items[it.row];
+                    it.row += 1;
+                    if (resolveGlobalId(it.world, gid)) |entity| {
+                        if (entity.getOneComponentById(it.filter_type)) |component| return component;
                     }
                 }
+                it.arch_index += 1;
+                it.row = 0;
             }
-
             return null;
         }
     };
@@ -342,8 +346,7 @@ pub const SuperComponents = struct {
 
     pub fn iteratorFilter(ctx: *SuperComponents, comptime comp_type: type) SuperComponents.MaskedIterator {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        const components = &world._components;
-        return .{ .ctx = components, .filter_type = world.typeId(comp_type), .alive = CHUNK_SIZE * world.components_len, .world = world };
+        return .{ .world = world, .filter_type = world.typeId(comp_type) };
     }
 
     pub fn iteratorFilterRange(ctx: *SuperComponents, comptime comp_type: type, start_idx: usize, end_idx: usize) SuperComponents.MaskedRangeIterator {
@@ -359,6 +362,24 @@ pub const SuperComponents = struct {
 
     pub fn iteratorFilterByEntityType(_: *SuperComponents, entity: *Entity, filter_type: u32) SuperComponents.MaskedEntityIterator {
         return .{ .filter_type = filter_type, .entity = entity };
+    }
+
+    /// Processes every SoA column for `comp_type` across matching archetype tables.
+    pub fn processComponentsSimd(ctx: *SuperComponents, comptime comp_type: type, processor: fn (*comp_type) void) void {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        ColumnSimd.forEachMatchingColumn(world, comp_type, processor);
+    }
+
+    /// Processes a row subrange `[row_start, row_end)` in each matching archetype column.
+    pub fn processComponentsRangeSimd(
+        ctx: *SuperComponents,
+        comptime comp_type: type,
+        row_start: usize,
+        row_end: usize,
+        processor: fn (*comp_type) void,
+    ) void {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        ColumnSimd.forEachMatchingColumnRange(world, comp_type, row_start, row_end, processor);
     }
 };
 
@@ -377,84 +398,18 @@ pub const _Components = struct {
 
     pub fn processComponentsSimd(ctx: *_Components, comptime comp_type: type, processor: fn (*comp_type) void) void {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        const filter_id = world.typeId(comp_type);
-        const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
-        var i: usize = 0;
-
-        // Process components in SIMD batches
-        while (i + vector_width <= ctx.alive) : (i += vector_width) {
-            const rems = blk: {
-                var result: @Vector(vector_width, u32) = undefined;
-                inline for (0..vector_width) |j| {
-                    result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
-                }
-                break :blk result;
-            };
-
-            // Process multiple components in parallel
-            inline for (0..vector_width) |j| {
-                const component = &ctx.sparse[@intCast(rems[j])];
-                if (component.alive and component.typeId == filter_id) {
-                    if (component.data) |data| {
-                        const typed_data = CastData(comp_type, data);
-                        processor(typed_data);
-                    }
-                }
-            }
-        }
-
-        // Handle remaining components
-        while (i < ctx.alive) : (i += 1) {
-            const rem = @rem(i, CHUNK_SIZE);
-            const component = &ctx.sparse[rem];
-            if (component.alive and component.typeId == filter_id) {
-                if (component.data) |data| {
-                    const typed_data = CastData(comp_type, data);
-                    processor(typed_data);
-                }
-            }
-        }
+        ColumnSimd.forEachMatchingColumn(world, comp_type, processor);
     }
 
-    pub fn processComponentsRangeSimd(ctx: *_Components, comptime comp_type: type, start_idx: usize, end_idx: usize, processor: fn (*comp_type) void) void {
+    pub fn processComponentsRangeSimd(
+        ctx: *_Components,
+        comptime comp_type: type,
+        row_start: usize,
+        row_end: usize,
+        processor: fn (*comp_type) void,
+    ) void {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        const filter_id = world.typeId(comp_type);
-        const vector_width = std.simd.suggestVectorLength(u32) orelse 4;
-        var i: usize = start_idx;
-
-        // Process components in SIMD batches within the range
-        while (i + vector_width <= end_idx) : (i += vector_width) {
-            const rems = blk: {
-                var result: @Vector(vector_width, u32) = undefined;
-                inline for (0..vector_width) |j| {
-                    result[j] = @intCast(@rem(i + j, CHUNK_SIZE));
-                }
-                break :blk result;
-            };
-
-            // Process multiple components in parallel
-            inline for (0..vector_width) |j| {
-                const component = &ctx.sparse[@intCast(rems[j])];
-                if (component.alive and component.typeId == filter_id) {
-                    if (component.data) |data| {
-                        const typed_data = CastData(comp_type, data);
-                        processor(typed_data);
-                    }
-                }
-            }
-        }
-
-        // Handle remaining components
-        while (i < end_idx) : (i += 1) {
-            const rem = @rem(i, CHUNK_SIZE);
-            const component = &ctx.sparse[rem];
-            if (component.alive and component.typeId == filter_id) {
-                if (component.data) |data| {
-                    const typed_data = CastData(comp_type, data);
-                    processor(typed_data);
-                }
-            }
-        }
+        ColumnSimd.forEachMatchingColumnRange(world, comp_type, row_start, row_end, processor);
     }
 
     pub fn create(ctx: *_Components, comptime comp_type: type) !*Component {
@@ -654,31 +609,283 @@ pub const Resources = struct {
     }
 };
 
-//Archetype index: groups live entities by their sparse component-type signature.
+//Dense SoA column for one component type inside an archetype table.
+pub const ArchetypeColumn = struct {
+    type_id: u32,
+    data: []u8 = &.{},
+    capacity: usize = 0,
+    elem_size: usize,
+    align_bytes: u8,
+
+    pub fn rowPtr(self: *const ArchetypeColumn, row: usize) ?*anyopaque {
+        if (self.elem_size == 0) return @ptrFromInt(1);
+        if (row >= self.capacity) return null;
+        return @ptrCast(self.data.ptr + row * self.elem_size);
+    }
+
+    fn ensureCapacity(self: *ArchetypeColumn, alloc: std.mem.Allocator, rows: usize) !void {
+        if (rows <= self.capacity) return;
+        var new_cap: usize = if (self.capacity == 0) 16 else self.capacity;
+        while (new_cap < rows) new_cap *= 2;
+        const total = new_cap * self.elem_size;
+        const new_bytes = try allocBytes(alloc, total, self.align_bytes);
+        if (self.capacity > 0) {
+            const old_bytes = self.capacity * self.elem_size;
+            @memcpy(new_bytes[0..old_bytes], self.data[0..old_bytes]);
+        }
+        if (self.capacity > 0) freeBytes(alloc, self.data, self.align_bytes);
+        self.data = new_bytes;
+        self.capacity = new_cap;
+    }
+
+    fn swapRows(self: *ArchetypeColumn, alloc: std.mem.Allocator, a: usize, b: usize) !void {
+        if (a == b or self.elem_size == 0) return;
+        const tmp = try allocBytes(alloc, self.elem_size, self.align_bytes);
+        defer freeBytes(alloc, tmp, self.align_bytes);
+        const a_off = a * self.elem_size;
+        const b_off = b * self.elem_size;
+        @memcpy(tmp, self.data[a_off .. a_off + self.elem_size]);
+        @memcpy(self.data[a_off .. a_off + self.elem_size], self.data[b_off .. b_off + self.elem_size]);
+        @memcpy(self.data[b_off .. b_off + self.elem_size], tmp);
+    }
+
+    fn deinit(self: *ArchetypeColumn, alloc: std.mem.Allocator) void {
+        if (self.capacity > 0) freeBytes(alloc, self.data, self.align_bytes);
+        self.* = .{ .type_id = self.type_id, .elem_size = self.elem_size, .align_bytes = self.align_bytes };
+    }
+};
+
+fn allocBytes(alloc: std.mem.Allocator, size: usize, align_bytes: u8) ![]u8 {
+    const mem = alloc.rawAlloc(size, .fromByteUnits(align_bytes), @returnAddress()) orelse return error.OutOfMemory;
+    return mem[0..size];
+}
+
+fn freeBytes(alloc: std.mem.Allocator, bytes: []u8, align_bytes: u8) void {
+    alloc.rawFree(bytes, .fromByteUnits(align_bytes), @returnAddress());
+}
+
+/// SoA column utilities: typed slices, dense iteration, and vectorized float math.
+pub const ColumnSimd = struct {
+    pub fn typedSlice(comptime T: type, col: *const ArchetypeColumn, row_count: usize) []T {
+        if (row_count == 0 or col.elem_size == 0) return &[_]T{};
+        const n = @min(row_count, col.capacity);
+        std.debug.assert(@sizeOf(T) == col.elem_size);
+        std.debug.assert(@alignOf(T) <= col.align_bytes);
+        return @as([*]T, @ptrCast(@alignCast(col.data.ptr)))[0..n];
+    }
+
+    pub fn processElements(comptime T: type, col: *const ArchetypeColumn, row_count: usize, processor: fn (*T) void) void {
+        const slice = typedSlice(T, col, row_count);
+        for (slice) |*elem| processor(elem);
+    }
+
+    pub fn forEachMatchingColumn(world: *World, comptime T: type, processor: fn (*T) void) void {
+        const tid = world.typeId(T);
+        for (world.archetypes.active.items) |arch_idx| {
+            const arch = &world.archetypes.list.items[arch_idx];
+            if (!arch.signature.contains(tid)) continue;
+            const col_idx = Archetypes.columnIndex(arch, tid) orelse continue;
+            const col = &arch.columns.items[col_idx];
+            processElements(T, col, arch.entities.items.len, processor);
+        }
+    }
+
+    pub fn forEachMatchingColumnRange(
+        world: *World,
+        comptime T: type,
+        row_start: usize,
+        row_end: usize,
+        processor: fn (*T) void,
+    ) void {
+        if (row_end <= row_start) return;
+        const tid = world.typeId(T);
+        for (world.archetypes.active.items) |arch_idx| {
+            const arch = &world.archetypes.list.items[arch_idx];
+            if (!arch.signature.contains(tid)) continue;
+            const col_idx = Archetypes.columnIndex(arch, tid) orelse continue;
+            const col = &arch.columns.items[col_idx];
+            const n = arch.entities.items.len;
+            const start = @min(row_start, n);
+            const end = @min(row_end, n);
+            if (end <= start) continue;
+            const slice = typedSlice(T, col, n);
+            for (slice[start..end]) |*elem| processor(elem);
+        }
+    }
+
+    /// `dst[i] += src[i] * scale` over the shared prefix, using SIMD when width > 1.
+    pub fn f32AddMulSimd(dst: []f32, src: []const f32, scale: f32) void {
+        const n = @min(dst.len, src.len);
+        if (n == 0) return;
+        const width = std.simd.suggestVectorLength(f32) orelse 1;
+        if (width <= 1) {
+            var i: usize = 0;
+            while (i < n) : (i += 1) dst[i] += src[i] * scale;
+            return;
+        }
+        const scale_v: @Vector(width, f32) = @splat(scale);
+        var i: usize = 0;
+        while (i + width <= n) : (i += width) {
+            var d: @Vector(width, f32) = undefined;
+            var s: @Vector(width, f32) = undefined;
+            inline for (0..width) |j| {
+                d[j] = dst[i + j];
+                s[j] = src[i + j];
+            }
+            d += s * scale_v;
+            inline for (0..width) |j| dst[i + j] = d[j];
+        }
+        while (i < n) : (i += 1) dst[i] += src[i] * scale;
+    }
+
+    /// Fills `slice` with `value`, unrolling with SIMD width when `T` is `f32`.
+    pub fn fillUniformSimd(comptime T: type, slice: []T, value: T) void {
+        if (slice.len == 0) return;
+        if (T != f32) {
+            for (slice) |*e| e.* = value;
+            return;
+        }
+        const width = std.simd.suggestVectorLength(f32) orelse 1;
+        if (width <= 1) {
+            for (slice) |*e| e.* = value;
+            return;
+        }
+        const val_v: @Vector(width, f32) = @splat(value);
+        var i: usize = 0;
+        while (i + width <= slice.len) : (i += width) {
+            inline for (0..width) |j| slice[i + j] = val_v[j];
+        }
+        while (i < slice.len) : (i += 1) slice[i] = value;
+    }
+};
+
+/// Typed SIMD helpers for common motion/physics component layouts.
+pub const SimdSystems = struct {
+    /// Velocity may use `dx`/`dy` or `x`/`y` (benchmark / C layouts use the latter).
+    fn velocityAxisName(comptime Velocity: type, comptime axis: enum { x, y }) []const u8 {
+        return switch (axis) {
+            .x => if (@hasField(Velocity, "dx")) "dx" else "x",
+            .y => if (@hasField(Velocity, "dy")) "dy" else "y",
+        };
+    }
+
+    /// Updates `positions[i].x/y += velocities[i].(dx|x)/(dy|y) * dt` using SIMD batches.
+    pub fn integratePosition2D(
+        comptime Position: type,
+        comptime Velocity: type,
+        positions: []Position,
+        velocities: []const Velocity,
+        dt: f32,
+    ) void {
+        std.debug.assert(positions.len == velocities.len);
+        const vx_name = comptime velocityAxisName(Velocity, .x);
+        const vy_name = comptime velocityAxisName(Velocity, .y);
+        const width = std.simd.suggestVectorLength(f32) orelse 1;
+        const dt_v: @Vector(width, f32) = @splat(dt);
+        var i: usize = 0;
+        if (width > 1) {
+            while (i + width <= positions.len) : (i += width) {
+                var px: @Vector(width, f32) = undefined;
+                var py: @Vector(width, f32) = undefined;
+                var vx: @Vector(width, f32) = undefined;
+                var vy: @Vector(width, f32) = undefined;
+                inline for (0..width) |j| {
+                    px[j] = positions[i + j].x;
+                    py[j] = positions[i + j].y;
+                    vx[j] = @field(velocities[i + j], vx_name);
+                    vy[j] = @field(velocities[i + j], vy_name);
+                }
+                px += vx * dt_v;
+                py += vy * dt_v;
+                inline for (0..width) |j| {
+                    positions[i + j].x = px[j];
+                    positions[i + j].y = py[j];
+                }
+            }
+        }
+        while (i < positions.len) : (i += 1) {
+            positions[i].x += @field(velocities[i], vx_name) * dt;
+            positions[i].y += @field(velocities[i], vy_name) * dt;
+        }
+    }
+
+    /// Runs `integratePosition2D` on every active archetype table that contains both type ids.
+    /// Used by the C API where component layouts are `{x:f32,y:f32}` for both columns.
+    pub fn integratePosition2DByTypeId(world: *World, pos_tid: u32, vel_tid: u32, dt: f32) void {
+        const Vec2 = extern struct { x: f32, y: f32 };
+        for (world.archetypes.active.items) |arch_idx| {
+            const arch = &world.archetypes.list.items[arch_idx];
+            const pos_col_idx = Archetypes.columnIndex(arch, pos_tid) orelse continue;
+            const vel_col_idx = Archetypes.columnIndex(arch, vel_tid) orelse continue;
+            const rows = arch.entities.items.len;
+            const pos_col = &arch.columns.items[pos_col_idx];
+            const vel_col = &arch.columns.items[vel_col_idx];
+            if (pos_col.elem_size != @sizeOf(Vec2) or vel_col.elem_size != @sizeOf(Vec2)) continue;
+            const positions = ColumnSimd.typedSlice(Vec2, pos_col, rows);
+            const velocities = ColumnSimd.typedSlice(Vec2, vel_col, rows);
+            integratePosition2D(Vec2, Vec2, positions, velocities, dt);
+        }
+    }
+
+    /// Runs `integratePosition2D` on every active archetype table that contains both types.
+    pub fn integratePosition2DQuery(world: *World, comptime Position: type, comptime Velocity: type, dt: f32) void {
+        const pos_tid = world.typeId(Position);
+        const vel_tid = world.typeId(Velocity);
+        for (world.archetypes.active.items) |arch_idx| {
+            const arch = &world.archetypes.list.items[arch_idx];
+            const pos_col_idx = Archetypes.columnIndex(arch, pos_tid) orelse continue;
+            const vel_col_idx = Archetypes.columnIndex(arch, vel_tid) orelse continue;
+            const rows = arch.entities.items.len;
+            const positions = ColumnSimd.typedSlice(Position, &arch.columns.items[pos_col_idx], rows);
+            const velocities = ColumnSimd.typedSlice(Velocity, &arch.columns.items[vel_col_idx], rows);
+            integratePosition2D(Position, Velocity, positions, velocities, dt);
+        }
+    }
+};
+
+//Archetype table: entities grouped by signature with SoA component columns.
 pub const Archetypes = struct {
     pub const nil: u32 = std.math.maxInt(u32);
+    pub const missing_col: u16 = std.math.maxInt(u16);
+
+    pub const PendingWrite = struct {
+        tid: u32 = 0,
+        data: ?*const anyopaque = null,
+    };
 
     pub const Archetype = struct {
         signature: TypeSignature,
         entities: std.ArrayListUnmanaged(u64) = .empty, //generation-tagged gids
+        columns: std.ArrayListUnmanaged(ArchetypeColumn) = .empty,
+        /// Dense type-id → column index; `missing_col` means absent. Built at creation.
+        col_idx_by_tid: []u16 = &.{},
+        /// Index into `active` when non-empty, else `nil`.
+        active_slot: u32 = nil,
     };
 
     list: std.ArrayListUnmanaged(Archetype) = .empty,
+    /// Non-empty archetype indices for query/foreach walks.
+    active: std.ArrayListUnmanaged(u32) = .empty,
+    /// Bumped when a new archetype table is created (cached queries refresh).
+    generation: u32 = 0,
+    //Stable empty signature for entities with no archetype table row yet.
+    empty_signature: TypeSignature = .{},
 
     pub fn deinit(self: *Archetypes, alloc: std.mem.Allocator) void {
+        self.empty_signature.deinit(alloc);
         for (self.list.items) |*a| {
             a.signature.deinit(alloc);
             a.entities.deinit(alloc);
+            for (a.columns.items) |*col| col.deinit(alloc);
+            a.columns.deinit(alloc);
+            if (a.col_idx_by_tid.len > 0) alloc.free(a.col_idx_by_tid);
         }
         self.list.deinit(alloc);
+        self.active.deinit(alloc);
     }
 
     pub fn count(self: *const Archetypes) usize {
-        var n: usize = 0;
-        for (self.list.items) |a| {
-            if (a.entities.items.len > 0) n += 1;
-        }
-        return n;
+        return self.active.items.len;
     }
 
     fn findIndex(self: *const Archetypes, sig: *const TypeSignature) ?u32 {
@@ -688,40 +895,420 @@ pub const Archetypes = struct {
         return null;
     }
 
-    fn indexFor(self: *Archetypes, alloc: std.mem.Allocator, sig: *const TypeSignature) !u32 {
+    pub fn columnIndex(arch: *const Archetype, tid: u32) ?usize {
+        if (tid < arch.col_idx_by_tid.len) {
+            const ci = arch.col_idx_by_tid[tid];
+            if (ci != missing_col) return ci;
+            return null;
+        }
+        // Fallback for any archetype built before the side table existed.
+        for (arch.signature.ids.items, 0..) |id, i| {
+            if (id == tid) return i;
+        }
+        return null;
+    }
+
+    fn markActive(self: *Archetypes, alloc: std.mem.Allocator, arch_idx: u32) void {
+        const arch = &self.list.items[arch_idx];
+        if (arch.active_slot != nil) return;
+        arch.active_slot = @intCast(self.active.items.len);
+        self.active.append(alloc, arch_idx) catch unreachable;
+    }
+
+    fn markInactive(self: *Archetypes, arch_idx: u32) void {
+        const arch = &self.list.items[arch_idx];
+        const slot = arch.active_slot;
+        if (slot == nil) return;
+        const last = self.active.items.len - 1;
+        if (slot < last) {
+            const moved = self.active.items[last];
+            self.active.items[slot] = moved;
+            self.list.items[moved].active_slot = slot;
+        }
+        _ = self.active.swapRemove(slot);
+        arch.active_slot = nil;
+    }
+
+    fn initArchetype(alloc: std.mem.Allocator, types: *const TypeRegistry, sig: *const TypeSignature) !Archetype {
+        var arch: Archetype = .{ .signature = try sig.clone(alloc), .entities = .empty, .columns = .empty };
+        errdefer {
+            arch.signature.deinit(alloc);
+            if (arch.col_idx_by_tid.len > 0) alloc.free(arch.col_idx_by_tid);
+            for (arch.columns.items) |*col| col.deinit(alloc);
+            arch.columns.deinit(alloc);
+        }
+        for (sig.ids.items) |tid| {
+            try arch.columns.append(alloc, .{
+                .type_id = tid,
+                .elem_size = types.sizeOf(tid),
+                .align_bytes = types.alignOf(tid),
+            });
+        }
+        var max_tid: u32 = 0;
+        for (sig.ids.items) |tid| max_tid = @max(max_tid, tid);
+        const table_len: usize = @as(usize, max_tid) + 1;
+        const table = try alloc.alloc(u16, table_len);
+        @memset(table, missing_col);
+        for (sig.ids.items, 0..) |tid, i| {
+            table[tid] = @intCast(i);
+        }
+        arch.col_idx_by_tid = table;
+        return arch;
+    }
+
+    fn indexFor(self: *Archetypes, alloc: std.mem.Allocator, types: *const TypeRegistry, sig: *const TypeSignature) !u32 {
         if (self.findIndex(sig)) |idx| return idx;
         const idx: u32 = @intCast(self.list.items.len);
-        try self.list.append(alloc, .{ .signature = try sig.clone(alloc), .entities = .empty });
+        try self.list.append(alloc, try initArchetype(alloc, types, sig));
+        self.generation +%= 1;
         return idx;
     }
 
-    pub fn insert(self: *Archetypes, alloc: std.mem.Allocator, entity: *Entity, sig: *const TypeSignature) !void {
-        const idx = try self.indexFor(alloc, sig);
+    fn growColumns(arch: *Archetype, alloc: std.mem.Allocator, rows: usize) !void {
+        for (arch.columns.items) |*col| try col.ensureCapacity(alloc, rows);
+    }
+
+    fn swapColumnRows(arch: *Archetype, alloc: std.mem.Allocator, a: usize, b: usize) !void {
+        for (arch.columns.items) |*col| try col.swapRows(alloc, a, b);
+    }
+
+    fn writeRowValue(
+        arch: *Archetype,
+        types: *const TypeRegistry,
+        row: usize,
+        tid: u32,
+        data: ?*const anyopaque,
+    ) void {
+        if (data == null) return;
+        const col_idx = columnIndex(arch, tid) orelse return;
+        const col = &arch.columns.items[col_idx];
+        if (col.elem_size == 0) return;
+        const dst = col.rowPtr(row) orelse return;
+        @memcpy(@as([*]u8, @ptrCast(dst))[0..col.elem_size], @as([*]const u8, @ptrCast(data.?))[0..col.elem_size]);
+        _ = types;
+    }
+
+    pub fn columnPtr(self: *const Archetypes, arch_idx: u32, row: usize, tid: u32) ?*anyopaque {
+        const arch = &self.list.items[arch_idx];
+        const col_idx = columnIndex(arch, tid) orelse return null;
+        return arch.columns.items[col_idx].rowPtr(row);
+    }
+
+    pub fn insert(self: *Archetypes, alloc: std.mem.Allocator, types: *const TypeRegistry, entity: *Entity, sig: *const TypeSignature) !void {
+        std.debug.assert(sig.ids.items.len > 0);
+        const idx = try self.indexFor(alloc, types, sig);
         const arch = &self.list.items[idx];
+        const row = arch.entities.items.len;
+        const old_cap = if (arch.columns.items.len > 0) arch.columns.items[0].capacity else 0;
+        try growColumns(arch, alloc, row + 1);
         try arch.entities.append(alloc, entityGlobalId(entity));
         entity.archetype = idx;
-        entity.archetype_row = @intCast(arch.entities.items.len - 1);
+        entity.archetype_row = @intCast(row);
+        if (row == 0) self.markActive(alloc, idx);
+        if (arch.columns.items.len > 0 and arch.columns.items[0].capacity > old_cap) {
+            const world = @as(*World, @ptrCast(@alignCast(entity.world)));
+            self.syncArchetypeComponentPointers(world, idx);
+        }
     }
 
-    pub fn remove(self: *Archetypes, world: *World, entity: *Entity) void {
+    //Appends many entities to one archetype table in a single grow + optional resync.
+    pub fn insertBatch(
+        self: *Archetypes,
+        alloc: std.mem.Allocator,
+        types: *const TypeRegistry,
+        world: *World,
+        sig: *const TypeSignature,
+        entities: []const *Entity,
+    ) !usize {
+        if (entities.len == 0) return 0;
+        std.debug.assert(sig.ids.items.len > 0);
+        const idx = try self.indexFor(alloc, types, sig);
+        const arch = &self.list.items[idx];
+        const start_row = arch.entities.items.len;
+        const new_total = start_row + entities.len;
+        const old_cap = if (arch.columns.items.len > 0) arch.columns.items[0].capacity else 0;
+        try growColumns(arch, alloc, new_total);
+        for (entities, 0..) |entity, i| {
+            try arch.entities.append(alloc, entityGlobalId(entity));
+            entity.archetype = idx;
+            entity.archetype_row = @intCast(start_row + i);
+        }
+        if (start_row == 0) self.markActive(alloc, idx);
+        if (arch.columns.items.len > 0 and arch.columns.items[0].capacity > old_cap) {
+            self.syncArchetypeComponentPointers(world, idx);
+        } else {
+            for (entities) |entity| world.syncEntityComponentPointers(entity);
+        }
+        return start_row;
+    }
+
+    pub fn fillColumnUniform(
+        arch: *Archetype,
+        tid: u32,
+        start_row: usize,
+        n: usize,
+        value: *const anyopaque,
+        elem_size: usize,
+    ) void {
+        if (elem_size == 0 or n == 0) return;
+        const col_idx = columnIndex(arch, tid) orelse return;
+        const col = &arch.columns.items[col_idx];
+        var r: usize = start_row;
+        while (r < start_row + n) : (r += 1) {
+            const dst = col.rowPtr(r) orelse continue;
+            @memcpy(@as([*]u8, @ptrCast(dst))[0..elem_size], @as([*]const u8, @ptrCast(value))[0..elem_size]);
+        }
+    }
+
+    pub fn fillColumnValues(
+        arch: *Archetype,
+        tid: u32,
+        start_row: usize,
+        values: []const u8,
+        elem_size: usize,
+    ) void {
+        if (elem_size == 0 or values.len == 0) return;
+        const col_idx = columnIndex(arch, tid) orelse return;
+        const col = &arch.columns.items[col_idx];
+        const n = values.len / elem_size;
+        var r: usize = 0;
+        while (r < n) : (r += 1) {
+            const dst = col.rowPtr(start_row + r) orelse continue;
+            @memcpy(@as([*]u8, @ptrCast(dst))[0..elem_size], values[r * elem_size ..][0..elem_size]);
+        }
+    }
+
+    fn syncArchetypeComponentPointers(self: *const Archetypes, world: *World, arch_idx: u32) void {
+        const arch = &self.list.items[arch_idx];
+        if (arch.columns.items.len == 0) return;
+        for (arch.entities.items) |gid| {
+            if (resolveGlobalId(world, gid)) |e| world.syncEntityComponentPointers(e);
+        }
+    }
+
+    pub fn remove(self: *Archetypes, alloc: std.mem.Allocator, world: *World, entity: *Entity) void {
         if (entity.archetype == nil) return;
-        const arch = &self.list.items[entity.archetype];
+        const arch_idx = entity.archetype;
+        const arch = &self.list.items[arch_idx];
         const row = entity.archetype_row;
+        const last = arch.entities.items.len - 1;
+        if (row < last) {
+            swapColumnRows(arch, alloc, row, last) catch unreachable;
+        }
         _ = arch.entities.swapRemove(row);
         if (row < arch.entities.items.len) {
-            if (resolveGlobalId(world, arch.entities.items[row])) |moved|
+            if (resolveGlobalId(world, arch.entities.items[row])) |moved| {
                 moved.archetype_row = row;
+            }
         }
         entity.archetype = nil;
+        if (arch.entities.items.len == 0) self.markInactive(arch_idx);
+        if (arch.columns.items.len > 0 and arch.entities.items.len > 0) self.syncArchetypeComponentPointers(world, arch_idx);
     }
 
-    pub fn move(self: *Archetypes, alloc: std.mem.Allocator, world: *World, entity: *Entity, new_sig: *const TypeSignature) !void {
-        if (entity.archetype != nil) {
-            const cur = &self.list.items[entity.archetype].signature;
-            if (cur.eql(new_sig.*)) return;
+    pub fn relocate(
+        self: *Archetypes,
+        alloc: std.mem.Allocator,
+        world: *World,
+        entity: *Entity,
+        new_sig: *const TypeSignature,
+        pending: ?PendingWrite,
+    ) !void {
+        if (new_sig.ids.items.len == 0) {
+            if (entity.archetype != nil) {
+                self.remove(alloc, world, entity);
+            } else {
+                entity.archetype = nil;
+            }
+            world.syncEntityComponentPointers(entity);
+            return;
         }
-        self.remove(world, entity);
-        try self.insert(alloc, entity, new_sig);
+
+        const old_idx = entity.archetype;
+        const old_row = entity.archetype_row;
+        const had_old = old_idx != nil;
+
+        if (had_old) {
+            const old = &self.list.items[old_idx];
+            if (old.signature.eql(new_sig.*)) {
+                if (pending) |pw| writeRowValue(old, &world.types, old_row, pw.tid, pw.data);
+                world.syncEntityComponentPointers(entity);
+                return;
+            }
+        }
+
+        // Snapshot overlapping column values before removing from the old table.
+        var saved: std.ArrayListUnmanaged(struct { tid: u32, bytes: []u8 }) = .empty;
+        defer {
+            for (saved.items) |entry| alloc.free(entry.bytes);
+            saved.deinit(alloc);
+        }
+        if (had_old) {
+            const old = &self.list.items[old_idx];
+            for (new_sig.ids.items) |tid| {
+                if (!old.signature.contains(tid)) continue;
+                const size = world.types.sizeOf(tid);
+                if (size == 0) continue;
+                const buf = try alloc.alloc(u8, size);
+                if (columnPtr(self, old_idx, old_row, tid)) |src| {
+                    @memcpy(buf, @as([*]const u8, @ptrCast(src))[0..size]);
+                }
+                try saved.append(alloc, .{ .tid = tid, .bytes = buf });
+            }
+            self.remove(alloc, world, entity);
+        }
+
+        try self.insert(alloc, &world.types, entity, new_sig);
+        const new_arch = &self.list.items[entity.archetype];
+        const new_row = entity.archetype_row;
+
+        for (saved.items) |entry| {
+            writeRowValue(new_arch, &world.types, new_row, entry.tid, entry.bytes.ptr);
+        }
+        if (pending) |pw| writeRowValue(new_arch, &world.types, new_row, pw.tid, pw.data);
+
+        world.syncEntityComponentPointers(entity);
+    }
+};
+
+/// Cached archetype query: stores sorted include/exclude type ids and matching
+/// archetype indices with per-archetype column indices in caller include order.
+/// Refresh when `world.archetypes.generation` advances (new archetype tables).
+pub const CachedQuery = struct {
+    world: *World,
+    include: []u32 = &.{},
+    exclude: []u32 = &.{},
+    /// Caller-order type ids (same order as create args / C include array).
+    caller_tids: []u32 = &.{},
+    matches: std.ArrayListUnmanaged(Match) = .empty,
+    cached_generation: u32 = std.math.maxInt(u32),
+
+    pub const Match = struct {
+        arch_idx: u32,
+        col_idxs: []u16 = &.{},
+    };
+
+    pub fn create(
+        world: *World,
+        include_ids: []const u32,
+        exclude_ids: []const u32,
+        caller_order: []const u32,
+    ) !*CachedQuery {
+        const alloc = world.allocator;
+        const q = try alloc.create(CachedQuery);
+        errdefer alloc.destroy(q);
+        q.* = .{ .world = world };
+
+        q.include = try alloc.dupe(u32, include_ids);
+        errdefer alloc.free(q.include);
+        q.exclude = try alloc.dupe(u32, exclude_ids);
+        errdefer alloc.free(q.exclude);
+        q.caller_tids = try alloc.dupe(u32, caller_order);
+        errdefer alloc.free(q.caller_tids);
+
+        if (q.include.len > 1) std.mem.sort(u32, q.include, {}, std.sort.asc(u32));
+        if (q.exclude.len > 1) std.mem.sort(u32, q.exclude, {}, std.sort.asc(u32));
+
+        try q.refresh();
+        return q;
+    }
+
+    pub fn destroy(self: *CachedQuery) void {
+        const alloc = self.world.allocator;
+        self.clearMatches(alloc);
+        if (self.include.len > 0) alloc.free(self.include);
+        if (self.exclude.len > 0) alloc.free(self.exclude);
+        if (self.caller_tids.len > 0) alloc.free(self.caller_tids);
+        alloc.destroy(self);
+    }
+
+    fn clearMatches(self: *CachedQuery, alloc: std.mem.Allocator) void {
+        for (self.matches.items) |*m| {
+            if (m.col_idxs.len > 0) alloc.free(m.col_idxs);
+        }
+        self.matches.clearRetainingCapacity();
+    }
+
+    pub fn refresh(self: *CachedQuery) !void {
+        const alloc = self.world.allocator;
+        self.clearMatches(alloc);
+        const arches = self.world.archetypes;
+        for (arches.list.items, 0..) |*arch, i| {
+            if (!arch.signature.matches(self.include, self.exclude)) continue;
+            const cols = try alloc.alloc(u16, self.caller_tids.len);
+            errdefer alloc.free(cols);
+            var missing = false;
+            for (self.caller_tids, 0..) |tid, j| {
+                if (Archetypes.columnIndex(arch, tid)) |ci| {
+                    cols[j] = @intCast(ci);
+                } else {
+                    missing = true;
+                    break;
+                }
+            }
+            if (missing) {
+                alloc.free(cols);
+                continue;
+            }
+            try self.matches.append(alloc, .{ .arch_idx = @intCast(i), .col_idxs = cols });
+        }
+        self.cached_generation = arches.generation;
+    }
+
+    pub fn ensureFresh(self: *CachedQuery) void {
+        if (self.cached_generation != self.world.archetypes.generation) {
+            self.refresh() catch unreachable;
+        }
+    }
+
+    /// Column-chunk callback: one invocation per matching non-empty archetype.
+    pub fn runColumns(
+        self: *CachedQuery,
+        cb: *const fn (columns: [*c]?*anyopaque, row_count: usize, n_types: usize, user_data: ?*anyopaque) callconv(.c) void,
+        user_data: ?*anyopaque,
+    ) void {
+        self.ensureFresh();
+        const n_types = self.caller_tids.len;
+        for (self.matches.items) |m| {
+            const arch = &self.world.archetypes.list.items[m.arch_idx];
+            const rows = arch.entities.items.len;
+            if (rows == 0) continue;
+
+            var columns: [16]?*anyopaque = @splat(null);
+            var missing = false;
+            var i: usize = 0;
+            while (i < n_types) : (i += 1) {
+                const col = &arch.columns.items[m.col_idxs[i]];
+                if (col.elem_size == 0) {
+                    columns[i] = @ptrFromInt(1);
+                } else if (col.capacity == 0) {
+                    missing = true;
+                    break;
+                } else {
+                    columns[i] = col.data.ptr;
+                }
+            }
+            if (missing) continue;
+            cb(&columns, rows, n_types, user_data);
+        }
+    }
+
+    /// SIMD Position+Velocity integrate using cached column indices.
+    pub fn integratePosition2D(self: *CachedQuery, dt: f32) void {
+        if (self.caller_tids.len < 2) return;
+        self.ensureFresh();
+        const Vec2 = extern struct { x: f32, y: f32 };
+        for (self.matches.items) |m| {
+            const arch = &self.world.archetypes.list.items[m.arch_idx];
+            const rows = arch.entities.items.len;
+            if (rows == 0) continue;
+            const pos_col = &arch.columns.items[m.col_idxs[0]];
+            const vel_col = &arch.columns.items[m.col_idxs[1]];
+            if (pos_col.elem_size != @sizeOf(Vec2) or vel_col.elem_size != @sizeOf(Vec2)) continue;
+            const positions = ColumnSimd.typedSlice(Vec2, pos_col, rows);
+            const velocities = ColumnSimd.typedSlice(Vec2, vel_col, rows);
+            SimdSystems.integratePosition2D(Vec2, Vec2, positions, velocities, dt);
+        }
     }
 };
 
@@ -1096,12 +1683,64 @@ pub const World = struct {
         try self.observers.onEntityDestroy(self.allocator, cb);
     }
 
-    //Rebuilds the entity's archetype from its owned components and moves it if
-    //the signature changed.
-    fn archetypeRefresh(self: *World, entity: *Entity) !void {
+    //Rebuilds the entity's archetype from its owned components and relocates it
+    //in the SoA table if the signature changed.
+    fn archetypeRefresh(self: *World, entity: *Entity, pending: Archetypes.PendingWrite) !void {
         var sig = try TypeSignature.fromEntity(self.allocator, entity);
         defer sig.deinit(self.allocator);
-        try self.archetypes.move(self.allocator, self, entity, &sig);
+        try self.archetypes.relocate(self.allocator, self, entity, &sig, pending);
+    }
+
+    //Points sole-owner, primary components at their archetype column cells.
+    fn syncEntityComponentPointers(self: *World, entity: *Entity) void {
+        var k: u32 = 0;
+        while (k < entity.owned.len) : (k += 1) {
+            const component = entity.owned.at(k);
+            if (!component.alive or !component.attached) continue;
+            const tid = component.typeId orelse continue;
+            if (component.owners.len != 1) continue;
+            if (!entity.isPrimaryComponent(component, tid)) continue;
+            if (entity.archetype == Archetypes.nil) continue;
+            if (self.archetypes.columnPtr(entity.archetype, entity.archetype_row, tid)) |ptr| {
+                component.data = ptr;
+                component.column_backed = true;
+                component.allocated = true;
+            }
+        }
+    }
+
+    pub fn archetypeColumnPtr(self: *const World, entity: *const Entity, tid: u32) ?*anyopaque {
+        if (entity.archetype == Archetypes.nil) return null;
+        return self.archetypes.columnPtr(entity.archetype, entity.archetype_row, tid);
+    }
+
+    //Links a component shell to an entity after a batch archetype insert.
+    pub fn wireBatchAttach(self: *World, entity: *Entity, component: *Component, tid: u32) !void {
+        try component.owners.add(self.allocator, entityGlobalId(entity));
+        try entity.owned.add(self.allocator, component);
+        component.attached = true;
+        component.column_backed = false;
+        component.allocated = false;
+        component.data = null;
+        self.syncEntityComponentPointers(entity);
+        _ = tid;
+    }
+
+    pub fn signatureFromComponents(self: *World, alloc: std.mem.Allocator, comptime components: anytype) !TypeSignature {
+        var sig: TypeSignature = .{};
+        inline for (components) |Comp| {
+            try sig.add(alloc, self.typeId(Comp));
+        }
+        return sig;
+    }
+
+    pub fn signatureFromInit(self: *World, alloc: std.mem.Allocator, init: anytype) !TypeSignature {
+        var sig: TypeSignature = .{};
+        const info = @typeInfo(@TypeOf(init)).@"struct";
+        inline for (info.field_types) |FieldType| {
+            try sig.add(alloc, self.typeId(FieldType));
+        }
+        return sig;
     }
 
     //Queues a structural event and invokes matching observers. Called from
@@ -1372,6 +2011,7 @@ pub const Component = struct {
     attached: bool,
     typeId: ?u32 = undefined,
     allocated: bool = false,
+    column_backed: bool = false,
     alive: bool = false,
     type_node: std.DoublyLinkedList.Node,
     magic: usize = MAGIC,
@@ -1416,12 +2056,12 @@ pub const Component = struct {
         if (self.owners.len > 0) {
             if (resolveGlobalId(world, self.owners.first)) |e| {
                 e.owned.remove(self);
-                world.archetypeRefresh(e) catch unreachable;
+                world.archetypeRefresh(e, .{}) catch unreachable;
             }
             for (self.owners.rest.items) |gid| {
                 if (resolveGlobalId(world, gid)) |e| {
                     e.owned.remove(self);
-                    world.archetypeRefresh(e) catch unreachable;
+                    world.archetypeRefresh(e, .{}) catch unreachable;
                 }
             }
         }
@@ -1433,17 +2073,67 @@ pub const Component = struct {
         const world = @as(*World, @ptrCast(@alignCast(self.world)));
 
         self.attached = false;
+        if (self.column_backed and self.owners.len > 0) {
+            if (resolveGlobalId(world, self.owners.first)) |e| {
+                self.promoteToHeap(world, e) catch {};
+            }
+        }
         self.releaseOwners(world);
     }
 
     pub inline fn dealloc(self: *Component) void {
-        if (!self.alive and self.magic == MAGIC and self.allocated) {
+        if (!self.alive and self.magic == MAGIC and self.allocated and !self.column_backed) {
             if (self.data) |data| {
                 const w = @as(*World, @ptrCast(@alignCast(self.world)));
                 const tid = self.typeId.?;
                 opaqueDestroy(w.allocator, data, w.types.sizeOf(tid), w.types.alignOf(tid));
             }
             self.allocated = false;
+        }
+    }
+
+    //Moves column-backed data onto the heap so multiple owners can share one blob.
+    fn promoteToHeap(self: *Component, world: *World, entity: *Entity) !void {
+        if (!self.column_backed) return;
+        const tid = self.typeId orelse return;
+        const size = world.types.sizeOf(tid);
+        const align_val = world.types.alignOf(tid);
+        if (size == 0) {
+            self.column_backed = false;
+            return;
+        }
+        const heap = try allocBytes(world.allocator, size, align_val);
+        if (self.column_backed) {
+            if (world.archetypeColumnPtr(entity, tid)) |src| {
+                @memcpy(heap, @as([*]const u8, @ptrCast(src))[0..size]);
+            } else if (self.data) |src| {
+                @memcpy(heap, @as([*]const u8, @ptrCast(src))[0..size]);
+            }
+        } else if (self.data) |src| {
+            @memcpy(heap, @as([*]const u8, @ptrCast(src))[0..size]);
+        }
+        self.data = heap.ptr;
+        self.column_backed = false;
+        self.allocated = true;
+    }
+
+    fn writeHeapValue(self: *Component, world: *World, tid: u32, data: ?*const anyopaque, size: usize) !void {
+        if (size == 0) return;
+        if (!self.allocated or self.column_backed) {
+            if (self.allocated and !self.column_backed) {
+                if (self.data) |old| {
+                    opaqueDestroy(world.allocator, old, world.types.sizeOf(tid), world.types.alignOf(tid));
+                }
+            }
+            const heap = try allocBytes(world.allocator, size, world.types.alignOf(tid));
+            self.data = heap.ptr;
+            self.column_backed = false;
+            self.allocated = true;
+        }
+        if (self.data) |dst| {
+            if (data) |src| {
+                @memcpy(@as([*]u8, @ptrCast(dst))[0..size], @as([*]const u8, @ptrCast(src))[0..size]);
+            }
         }
     }
 
@@ -1488,7 +2178,34 @@ pub const Entity = struct {
     //Returns this entity's archetype signature (sorted owned type ids).
     pub inline fn signature(self: *const Entity) *const TypeSignature {
         const world = @as(*World, @ptrCast(@alignCast(self.world)));
+        if (self.archetype == Archetypes.nil) return &world.archetypes.empty_signature;
         return &world.archetypes.list.items[self.archetype].signature;
+    }
+
+    //True if `component` is the first live owned component of `tid` on this entity.
+    pub inline fn isPrimaryComponent(self: *const Entity, component: *const Component, tid: u32) bool {
+        var k: u32 = 0;
+        while (k < self.owned.len) : (k += 1) {
+            const c = self.owned.at(k);
+            if (!c.alive) continue;
+            if (c.typeId) |t| {
+                if (t == tid) return c == component;
+            }
+        }
+        return false;
+    }
+
+    pub inline fn countOwnedOfType(self: *const Entity, tid: u32) u32 {
+        var n: u32 = 0;
+        var k: u32 = 0;
+        while (k < self.owned.len) : (k += 1) {
+            const c = self.owned.at(k);
+            if (!c.alive) continue;
+            if (c.typeId) |t| {
+                if (t == tid) n += 1;
+            }
+        }
+        return n;
     }
 
     pub inline fn addComponent(ctx: *Entity, comp_val: anytype) !*Component {
@@ -1569,70 +2286,59 @@ pub const Entity = struct {
     pub fn attach(self: *Entity, component: *Component, comp_type: anytype) !void {
         const world = @as(*World, @ptrCast(@alignCast(component.world)));
         const tid = world.typeId(@TypeOf(comp_type));
-
-        if (@sizeOf(@TypeOf(comp_type)) > 0) {
-            if (!component.allocated) {
-                const data = try world.allocator.create(@TypeOf(comp_type));
-                data.* = comp_type;
-                const oref = @as(?*anyopaque, @ptrCast(data));
-                component.data = oref;
-            } else {
-                if (component.allocated and component.typeId == tid) {
-                    const data = CastData(@TypeOf(comp_type), component.data);
-                    data.* = comp_type;
-                } else {
-                    if (component.allocated and component.typeId != tid) {
-                        const old_tid = component.typeId.?;
-                        opaqueDestroy(world.allocator, component.data, world.types.sizeOf(old_tid), world.types.alignOf(old_tid));
-                        const data = try world.allocator.create(@TypeOf(comp_type));
-                        data.* = comp_type;
-                        const oref = @as(?*anyopaque, @ptrCast(data));
-                        component.data = oref;
-                    }
-                }
-            }
-        }
-        component.attached = true;
-        component.allocated = true;
+        const comp_size = @sizeOf(@TypeOf(comp_type));
 
         try component.owners.add(world.allocator, entityGlobalId(self));
         try self.owned.add(world.allocator, component);
-        try world.archetypeRefresh(self);
+        component.attached = true;
+
+        const shared = component.owners.len > 1;
+        const overflow = self.countOwnedOfType(tid) > 1;
+
+        if (shared or overflow) {
+            if (component.column_backed) try component.promoteToHeap(world, self);
+            const val_ptr: ?*const anyopaque = if (comp_size > 0) @ptrCast(&comp_type) else null;
+            try component.writeHeapValue(world, tid, val_ptr, comp_size);
+            try world.archetypeRefresh(self, .{ .tid = tid, .data = val_ptr });
+        } else {
+            component.column_backed = false;
+            component.allocated = false;
+            component.data = null;
+            const val_ptr: ?*const anyopaque = if (comp_size > 0) @ptrCast(&comp_type) else null;
+            try world.archetypeRefresh(self, .{ .tid = tid, .data = val_ptr });
+        }
+
         if (component.typeId) |ctid| world.signalComponentAdded(self, component, ctid);
     }
 
     pub fn attach_c(self: *Entity, component: *Component, comp_type: *c_type) !void {
         const world = @as(*World, @ptrCast(@alignCast(component.world)));
         const tid = world.typeIdC(comp_type.*);
-
-        if (comp_type.size > 0) {
-            if (!component.allocated) {
-                const data = try world.allocator.create(c_type);
-                data.* = comp_type.*;
-                const oref = @as(?*anyopaque, @ptrCast(data));
-                component.data = oref;
-            } else {
-                if (component.allocated and component.typeId == tid) {
-                    const data = CastData(c_type, component.data);
-                    data.* = comp_type.*;
-                } else {
-                    if (component.allocated and component.typeId != tid) {
-                        const old_tid = component.typeId.?;
-                        opaqueDestroy(world.allocator, component.data, world.types.sizeOf(old_tid), world.types.alignOf(old_tid));
-                        const data = try world.allocator.create(c_type);
-                        data.* = comp_type.*;
-                        const oref = @as(?*anyopaque, @ptrCast(data));
-                        component.data = oref;
-                    }
-                }
-            }
-        }
-        component.attached = true;
-        component.allocated = true;
+        const comp_size = comp_type.size;
 
         try component.owners.add(world.allocator, entityGlobalId(self));
         try self.owned.add(world.allocator, component);
-        try world.archetypeRefresh(self);
+        component.attached = true;
+
+        const shared = component.owners.len > 1;
+        const overflow = self.countOwnedOfType(tid) > 1;
+
+        if (shared or overflow) {
+            if (component.column_backed) try component.promoteToHeap(world, self);
+            if (comp_size > 0 and (!component.allocated or component.column_backed)) {
+                const heap = try allocBytes(world.allocator, comp_size, world.types.alignOf(tid));
+                component.data = heap.ptr;
+                component.column_backed = false;
+                component.allocated = true;
+            }
+            try world.archetypeRefresh(self, .{ .tid = tid, .data = component.data });
+        } else {
+            component.column_backed = false;
+            component.allocated = false;
+            component.data = null;
+            try world.archetypeRefresh(self, .{ .tid = tid, .data = null });
+        }
+
         if (component.typeId) |ctid| world.signalComponentAdded(self, component, ctid);
     }
 
@@ -1642,7 +2348,12 @@ pub const Entity = struct {
         component.attached = false;
         component.owners.remove(entityGlobalId(self));
         self.owned.remove(component);
-        try world.archetypeRefresh(self);
+        if (component.column_backed and component.owners.len == 0) {
+            component.column_backed = false;
+            component.data = null;
+            component.allocated = false;
+        }
+        try world.archetypeRefresh(self, .{});
         if (component.typeId) |tid| world.signalComponentRemoved(self, component, tid);
     }
 
@@ -1666,7 +2377,7 @@ pub const Entity = struct {
         }
         self.owned.clear(world.allocator);
 
-        world.archetypes.remove(world, self);
+        world.archetypes.remove(world.allocator, world, self);
 
         world.signalEntityDestroyed(self);
         self.alive = false;
@@ -1779,42 +2490,30 @@ pub const SuperEntities = struct {
         }
     };
 
-    //Yields entities that own a component of `filter_type`. Implemented by
-    //scanning components (O(components)) and resolving each matching component's
-    //owners through the global-id OwnerSet, so it is exact across entity chunks.
-    //`alive` is the component slot scan bound (CHUNK_SIZE * components_len).
-    //An entity owning N matching components is yielded N times.
+    //Yields entities whose archetype signature includes `filter_type`.
     pub const MaskedIterator = struct {
-        ctx: *[]Entities,
-        index: usize = 0,
-        owner_idx: usize = 0,
-        filter_type: u32,
-        alive: usize = 0,
         world: *World,
+        filter_type: u32,
+        arch_index: usize = 0,
+        row: usize = 0,
 
         pub fn next(it: *MaskedIterator) ?*Entity {
-            while (it.index < it.alive) {
-                const mod = it.index / CHUNK_SIZE;
-                const rem = @rem(it.index, CHUNK_SIZE);
-                const component = &it.world._components[mod].sparse[rem];
-
-                const matches = component.alive and component.owners.len > 0 and
-                    (if (component.typeId) |tid| tid == it.filter_type else false);
-
-                if (matches and it.owner_idx < component.owners.len) {
-                    const k = it.owner_idx;
-                    it.owner_idx += 1;
-                    const gid = if (k == 0) component.owners.first else component.owners.rest.items[k - 1];
-                    //Skip owners whose entity was destroyed/recycled (generation
-                    //mismatch) so a stale ownership entry never yields a wrong entity.
-                    if (resolveGlobalId(it.world, gid)) |entity| return entity;
+            const active = it.world.archetypes.active.items;
+            while (it.arch_index < active.len) {
+                const arch = &it.world.archetypes.list.items[active[it.arch_index]];
+                if (!arch.signature.contains(it.filter_type)) {
+                    it.arch_index += 1;
+                    it.row = 0;
                     continue;
                 }
-
-                it.index += 1;
-                it.owner_idx = 0;
+                while (it.row < arch.entities.items.len) {
+                    const gid = arch.entities.items[it.row];
+                    it.row += 1;
+                    if (resolveGlobalId(it.world, gid)) |entity| return entity;
+                }
+                it.arch_index += 1;
+                it.row = 0;
             }
-
             return null;
         }
     };
@@ -1842,8 +2541,7 @@ pub const SuperEntities = struct {
 
     pub fn iteratorFilter(ctx: *SuperEntities, comptime comp_type: type) SuperEntities.MaskedIterator {
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        const entities = &world._entities;
-        return .{ .ctx = entities, .filter_type = world.typeId(comp_type), .alive = CHUNK_SIZE * world.components_len, .world = world };
+        return .{ .world = world, .filter_type = world.typeId(comp_type) };
     }
 
     pub const QueryIterator = struct {
@@ -1854,6 +2552,8 @@ pub const SuperEntities = struct {
         exclude: []const u32 = &.{},
         arch_index: usize = 0,
         row: usize = 0,
+        untagged_chunk: usize = 0,
+        untagged_slot: usize = 0,
         heap_include: ?[]u32 = null,
         heap_exclude: ?[]u32 = null,
 
@@ -1865,9 +2565,9 @@ pub const SuperEntities = struct {
         }
 
         pub fn next(it: *QueryIterator) ?*Entity {
-            const archetypes = it.world.archetypes.list.items;
-            while (it.arch_index < archetypes.len) {
-                const arch = &archetypes[it.arch_index];
+            const active = it.world.archetypes.active.items;
+            while (it.arch_index < active.len) {
+                const arch = &it.world.archetypes.list.items[active[it.arch_index]];
                 if (!arch.signature.matches(it.include, it.exclude)) {
                     it.arch_index += 1;
                     it.row = 0;
@@ -1880,6 +2580,19 @@ pub const SuperEntities = struct {
                 }
                 it.arch_index += 1;
                 it.row = 0;
+            }
+
+            //Component-less entities are not placed in a table until first attach.
+            if (it.include.len > 0) return null;
+            while (it.untagged_chunk < it.world.entities_len) {
+                while (it.untagged_slot < CHUNK_SIZE) {
+                    const entity = &it.world._entities[it.untagged_chunk].sparse[it.untagged_slot];
+                    it.untagged_slot += 1;
+                    if (!entity.alive or entity.archetype != Archetypes.nil) continue;
+                    return entity;
+                }
+                it.untagged_chunk += 1;
+                it.untagged_slot = 0;
             }
             return null;
         }
@@ -1925,6 +2638,321 @@ pub const SuperEntities = struct {
         std.mem.sort(u32, it.heap_exclude.?, {}, std.sort.asc(u32));
         return it;
     }
+
+    /// Spawns `n` component-less entities (no archetype table row until first attach).
+    pub fn createBatch(ctx: *SuperEntities, n: usize) !void {
+        var i: usize = 0;
+        while (i < n) : (i += 1) _ = try ctx.create();
+    }
+
+    /// Spawns `n` entities with one component type, copying `value` into each SoA row.
+    pub fn createBatchUniform(ctx: *SuperEntities, comptime T: type, n: usize, value: T) !void {
+        if (n == 0) return;
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const tid = world.typeId(T);
+
+        var sig = try world.signatureFromComponents(world.allocator, .{T});
+        defer sig.deinit(world.allocator);
+
+        const ents = try world.allocator.alloc(*Entity, n);
+        defer world.allocator.free(ents);
+        const comps = try world.allocator.alloc(*Component, n);
+        defer world.allocator.free(comps);
+
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            ents[i] = try ctx.create();
+            comps[i] = try world.components.create(T);
+        }
+
+        const start_row = try world.archetypes.insertBatch(world.allocator, &world.types, world, &sig, ents);
+        const arch = &world.archetypes.list.items[ents[0].archetype];
+        Archetypes.fillColumnUniform(arch, tid, start_row, n, @ptrCast(&value), @sizeOf(T));
+
+        i = 0;
+        while (i < n) : (i += 1) {
+            try world.wireBatchAttach(ents[i], comps[i], tid);
+            world.signalComponentAdded(ents[i], comps[i], tid);
+        }
+    }
+
+    /// Spawns one entity per value, writing each into the SoA column directly.
+    pub fn createBatchValues(ctx: *SuperEntities, comptime T: type, values: []const T) !void {
+        if (values.len == 0) return;
+        try ctx.createBatchUniformValues(T, values);
+    }
+
+    fn createBatchUniformValues(ctx: *SuperEntities, comptime T: type, values: []const T) !void {
+        const n = values.len;
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const tid = world.typeId(T);
+
+        var sig = try world.signatureFromComponents(world.allocator, .{T});
+        defer sig.deinit(world.allocator);
+
+        const ents = try world.allocator.alloc(*Entity, n);
+        defer world.allocator.free(ents);
+        const comps = try world.allocator.alloc(*Component, n);
+        defer world.allocator.free(comps);
+
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            ents[i] = try ctx.create();
+            comps[i] = try world.components.create(T);
+        }
+
+        const start_row = try world.archetypes.insertBatch(world.allocator, &world.types, world, &sig, ents);
+        const arch = &world.archetypes.list.items[ents[0].archetype];
+        Archetypes.fillColumnValues(arch, tid, start_row, std.mem.sliceAsBytes(values), @sizeOf(T));
+
+        i = 0;
+        while (i < n) : (i += 1) {
+            try world.wireBatchAttach(ents[i], comps[i], tid);
+            world.signalComponentAdded(ents[i], comps[i], tid);
+        }
+    }
+
+    /// Spawns `n` entities with multiple component types, copying `init` into every row.
+    pub fn createBatchComponents(ctx: *SuperEntities, n: usize, init: anytype) !void {
+        if (n == 0) return;
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        const info = @typeInfo(@TypeOf(init)).@"struct";
+        const nfields = info.field_types.len;
+
+        var sig = try world.signatureFromInit(world.allocator, init);
+        defer sig.deinit(world.allocator);
+
+        const ents = try world.allocator.alloc(*Entity, n);
+        defer world.allocator.free(ents);
+        const all_comps = try world.allocator.alloc(*Component, n * nfields);
+        defer world.allocator.free(all_comps);
+
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            ents[i] = try ctx.create();
+            inline for (info.field_types, 0..) |FieldType, fi| {
+                all_comps[i * nfields + fi] = try world.components.create(FieldType);
+            }
+        }
+
+        const start_row = try world.archetypes.insertBatch(world.allocator, &world.types, world, &sig, ents);
+        const arch = &world.archetypes.list.items[ents[0].archetype];
+
+        inline for (info.field_names, info.field_types) |name, FieldType| {
+            const col_tid = world.typeId(FieldType);
+            const val = @field(init, name);
+            Archetypes.fillColumnUniform(arch, col_tid, start_row, n, @ptrCast(&val), @sizeOf(FieldType));
+        }
+
+        i = 0;
+        while (i < n) : (i += 1) {
+            inline for (info.field_types, 0..) |FieldType, fi| {
+                const wire_tid = world.typeId(FieldType);
+                const comp = all_comps[i * nfields + fi];
+                try world.wireBatchAttach(ents[i], comp, wire_tid);
+                world.signalComponentAdded(ents[i], comp, wire_tid);
+            }
+        }
+    }
+
+    pub fn QueryView(comptime include: anytype, comptime _exclude: anytype) type {
+        _ = _exclude;
+        return struct {
+            world: *World,
+            include_storage: [64]u32 = undefined,
+            exclude_storage: [64]u32 = undefined,
+            include: []const u32 = &.{},
+            exclude: []const u32 = &.{},
+            arch_index: usize = 0,
+            row: usize = 0,
+
+            pub const Row = struct {
+                entity: *Entity,
+                world: *World,
+                arch_idx: u32,
+                row: usize,
+
+                /// Returns a direct pointer into the archetype SoA column for `T`.
+                pub fn get(self: Row, comptime T: type) *T {
+                    comptime var ok = false;
+                    inline for (include) |Comp| {
+                        if (T == Comp) ok = true;
+                    }
+                    if (!ok) @compileError("component type not in query view");
+                    const tid = self.world.typeId(T);
+                    if (self.world.archetypes.columnPtr(self.arch_idx, self.row, tid)) |ptr| {
+                        return CastData(T, ptr);
+                    }
+                    return self.entity.get(T) orelse unreachable;
+                }
+            };
+
+            pub fn next(it: *@This()) ?Row {
+                const active = it.world.archetypes.active.items;
+                while (it.arch_index < active.len) {
+                    const arch_idx = active[it.arch_index];
+                    const arch = &it.world.archetypes.list.items[arch_idx];
+                    if (!arch.signature.matches(it.include, it.exclude)) {
+                        it.arch_index += 1;
+                        it.row = 0;
+                        continue;
+                    }
+                    while (it.row < arch.entities.items.len) {
+                        const gid = arch.entities.items[it.row];
+                        const current_row = it.row;
+                        it.row += 1;
+                        if (resolveGlobalId(it.world, gid)) |entity| {
+                            return Row{
+                                .entity = entity,
+                                .world = it.world,
+                                .arch_idx = arch_idx,
+                                .row = current_row,
+                            };
+                        }
+                    }
+                    it.arch_index += 1;
+                    it.row = 0;
+                }
+                return null;
+            }
+        };
+    }
+
+    fn buildQueryView(world: *World, comptime include: anytype, comptime exclude: anytype) SuperEntities.QueryView(include, exclude) {
+        var qv = SuperEntities.QueryView(include, exclude){ .world = world };
+        var inc_len: usize = 0;
+        inline for (include) |T| {
+            qv.include_storage[inc_len] = world.typeId(T);
+            inc_len += 1;
+        }
+        qv.include = qv.include_storage[0..inc_len];
+        var exc_len: usize = 0;
+        inline for (exclude) |T| {
+            qv.exclude_storage[exc_len] = world.typeId(T);
+            exc_len += 1;
+        }
+        std.mem.sort(u32, qv.include_storage[0..inc_len], {}, std.sort.asc(u32));
+        std.mem.sort(u32, qv.exclude_storage[0..exc_len], {}, std.sort.asc(u32));
+        qv.exclude = qv.exclude_storage[0..exc_len];
+        return qv;
+    }
+
+    /// Archetype-backed query yielding direct SoA column pointers per component type.
+    pub fn queryView(ctx: *SuperEntities, comptime include: anytype) SuperEntities.QueryView(include, .{}) {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return SuperEntities.buildQueryView(world, include, .{});
+    }
+
+    pub fn queryViewExclude(ctx: *SuperEntities, comptime include: anytype, comptime exclude: anytype) SuperEntities.QueryView(include, exclude) {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return SuperEntities.buildQueryView(world, include, exclude);
+    }
+
+    pub fn QueryViewSimd(comptime include: anytype, comptime _exclude: anytype) type {
+        _ = _exclude;
+        return struct {
+            world: *World,
+            include_storage: [64]u32 = undefined,
+            exclude_storage: [64]u32 = undefined,
+            include: []const u32 = &.{},
+            exclude: []const u32 = &.{},
+            arch_index: usize = 0,
+
+            /// Invokes `callback` with a dense typed column slice for each matching archetype.
+            pub fn forEachColumn(it: *@This(), comptime T: type, callback: fn ([]T, arch_idx: u32) void) void {
+                comptime var ok = false;
+                inline for (include) |Comp| {
+                    if (T == Comp) ok = true;
+                }
+                if (!ok) @compileError("component type not in queryViewSimd include list");
+                const tid = it.world.typeId(T);
+                it.arch_index = 0;
+                const active = it.world.archetypes.active.items;
+                while (it.arch_index < active.len) {
+                    const arch_idx = active[it.arch_index];
+                    it.arch_index += 1;
+                    const arch = &it.world.archetypes.list.items[arch_idx];
+                    if (!arch.signature.matches(it.include, it.exclude)) continue;
+                    const col_idx = Archetypes.columnIndex(arch, tid) orelse continue;
+                    const col = &arch.columns.items[col_idx];
+                    const slice = ColumnSimd.typedSlice(T, col, arch.entities.items.len);
+                    callback(slice, arch_idx);
+                }
+            }
+
+            /// Element-wise callback over every row in matching columns for `T`.
+            pub fn processColumn(it: *@This(), comptime T: type, processor: fn (*T) void) void {
+                const Proc = struct {
+                    fn cb(slice: []T, _: u32) void {
+                        for (slice) |*elem| processor(elem);
+                    }
+                };
+                it.forEachColumn(T, Proc.cb);
+            }
+
+            /// SIMD integration when the query includes both `Position` and `Velocity` types.
+            pub fn integratePosition2D(
+                it: *@This(),
+                comptime Position: type,
+                comptime Velocity: type,
+                dt: f32,
+            ) void {
+                comptime var has_pos = false;
+                comptime var has_vel = false;
+                inline for (include) |Comp| {
+                    if (Comp == Position) has_pos = true;
+                    if (Comp == Velocity) has_vel = true;
+                }
+                if (!has_pos or !has_vel) @compileError("integratePosition2D requires Position and Velocity in include");
+                const pos_tid = it.world.typeId(Position);
+                const vel_tid = it.world.typeId(Velocity);
+                it.arch_index = 0;
+                const active = it.world.archetypes.active.items;
+                while (it.arch_index < active.len) {
+                    const arch_idx = active[it.arch_index];
+                    it.arch_index += 1;
+                    const arch = &it.world.archetypes.list.items[arch_idx];
+                    if (!arch.signature.matches(it.include, it.exclude)) continue;
+                    const pos_idx = Archetypes.columnIndex(arch, pos_tid) orelse continue;
+                    const vel_idx = Archetypes.columnIndex(arch, vel_tid) orelse continue;
+                    const rows = arch.entities.items.len;
+                    const positions = ColumnSimd.typedSlice(Position, &arch.columns.items[pos_idx], rows);
+                    const velocities = ColumnSimd.typedSlice(Velocity, &arch.columns.items[vel_idx], rows);
+                    SimdSystems.integratePosition2D(Position, Velocity, positions, velocities, dt);
+                }
+            }
+        };
+    }
+
+    fn buildQueryViewSimd(world: *World, comptime include: anytype, comptime exclude: anytype) SuperEntities.QueryViewSimd(include, exclude) {
+        var qv = SuperEntities.QueryViewSimd(include, exclude){ .world = world };
+        var inc_len: usize = 0;
+        inline for (include) |T| {
+            qv.include_storage[inc_len] = world.typeId(T);
+            inc_len += 1;
+        }
+        qv.include = qv.include_storage[0..inc_len];
+        var exc_len: usize = 0;
+        inline for (exclude) |T| {
+            qv.exclude_storage[exc_len] = world.typeId(T);
+            exc_len += 1;
+        }
+        std.mem.sort(u32, qv.include_storage[0..inc_len], {}, std.sort.asc(u32));
+        std.mem.sort(u32, qv.exclude_storage[0..exc_len], {}, std.sort.asc(u32));
+        qv.exclude = qv.exclude_storage[0..exc_len];
+        return qv;
+    }
+
+    /// Query filter + dense SoA column iteration with SIMD helpers.
+    pub fn queryViewSimd(ctx: *SuperEntities, comptime include: anytype) SuperEntities.QueryViewSimd(include, .{}) {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return SuperEntities.buildQueryViewSimd(world, include, .{});
+    }
+
+    pub fn queryViewSimdExclude(ctx: *SuperEntities, comptime include: anytype, comptime exclude: anytype) SuperEntities.QueryViewSimd(include, exclude) {
+        const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
+        return SuperEntities.buildQueryViewSimd(world, include, exclude);
+    }
 };
 
 const Entities = struct {
@@ -1966,8 +2994,6 @@ const Entities = struct {
         ctx.free_idx += 1;
 
         const world = @as(*World, @ptrCast(@alignCast(ctx.world)));
-        const empty_sig: TypeSignature = .{};
-        try world.archetypes.insert(world.allocator, entity, &empty_sig);
         world.signalEntitySpawned(entity);
 
         return entity;
@@ -2665,7 +3691,7 @@ test "archetype index groups entities by signature" {
     _ = try e3.addComponent(A{});
     _ = try e3.addComponent(B{});
 
-    try std.testing.expectEqual(@as(usize, 3), world.archetypes.count());
+    try std.testing.expectEqual(@as(usize, 2), world.archetypes.count());
     try std.testing.expectEqual(@as(usize, 0), e1.signature().ids.items.len);
     try std.testing.expect(e2.signature().contains(world.typeId(A)));
     try std.testing.expect(e3.signature().contains(world.typeId(A)));
@@ -2776,13 +3802,13 @@ test "per-world type registry supports many component types" {
 
     var i: u32 = 0;
     while (i < 80) : (i += 1) {
-        const ct = c_type{ .id = @as(usize, @intCast(i)) + 1000, .size = 4, .alignof = 4, .name = null };
+        const ct = c_type{ .id = @as(usize, @intCast(i)) + 1000, .size = 4, .alignment = 4, .name = null };
         const id = world.typeIdC(ct);
         try std.testing.expectEqual(i, id);
     }
     try std.testing.expectEqual(@as(u32, 80), world.types.count());
 
-    var ct79 = c_type{ .id = 79 + 1000, .size = @sizeOf(u32), .alignof = @alignOf(u32), .name = null };
+    var ct79 = c_type{ .id = 79 + 1000, .size = @sizeOf(u32), .alignment = @alignOf(u32), .name = null };
     const e = try world.entities.create();
     const c = try world.components.create_c(ct79);
     try e.attach_c(c, &ct79);
@@ -2824,4 +3850,213 @@ test "structural events queue lifecycle changes" {
     world.events.drainStructural(C.onEvent);
     try std.testing.expectEqual(@as(u32, 1), C.spawns);
     try std.testing.expect(world.events.queue.items.len == 0);
+}
+
+test "SoA archetype tables survive bulk attach and detach" {
+    const Orange = struct { color: u32 = 0, ripe: bool = false, harvested: bool = false };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    var i: usize = 0;
+    while (i < 5000) : (i += 1) {
+        const e = try world.entities.create();
+        const c = try world.components.create(Orange);
+        try e.attach(c, Orange{ .color = @intCast(i) });
+    }
+
+    var seen: usize = 0;
+    var it = world.components.iterator();
+    while (it.next()) |component| {
+        if (component.typeId != world.typeId(Orange)) continue;
+        try component.set(Orange, .{ .ripe = true });
+        component.detach();
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5000), seen);
+}
+
+test "queryView yields direct SoA column pointers" {
+    const Position = struct { x: f32, y: f32 };
+    const Velocity = struct { dx: f32, dy: f32 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    const e = try world.entities.create();
+    _ = try e.addComponent(Position{ .x = 1, .y = 2 });
+    _ = try e.addComponent(Velocity{ .dx = 3, .dy = 4 });
+
+    var qv = world.entities.queryView(.{ Position, Velocity });
+    const row = qv.next() orelse return error.TestExpectedEqual;
+    try std.testing.expectEqual(@as(f32, 1), row.get(Position).x);
+    try std.testing.expectEqual(@as(f32, 2), row.get(Position).y);
+    try std.testing.expectEqual(@as(f32, 3), row.get(Velocity).dx);
+    try std.testing.expectEqual(@as(f32, 4), row.get(Velocity).dy);
+
+    row.get(Position).x = 10;
+    try std.testing.expectEqual(@as(f32, 10), e.get(Position).?.x);
+    try std.testing.expect(qv.next() == null);
+}
+
+test "createBatchUniform spawns entities with shared component values" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    try world.entities.createBatchUniform(A, 100, .{ .v = 42 });
+    try std.testing.expectEqual(@as(u32, 100), world.entities.count());
+    try std.testing.expectEqual(@as(u32, 100), world.components.count());
+
+    var seen: usize = 0;
+    var qv = world.entities.queryView(.{A});
+    while (qv.next()) |row| {
+        try std.testing.expectEqual(@as(u32, 42), row.get(A).v);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 100), seen);
+}
+
+test "createBatchValues writes distinct SoA rows" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    var vals: [5]A = undefined;
+    for (0..5) |i| vals[i] = .{ .v = @intCast(i) };
+    try world.entities.createBatchValues(A, &vals);
+
+    var qv = world.entities.queryView(.{A});
+    var seen: usize = 0;
+    while (qv.next()) |row| {
+        try std.testing.expectEqual(@as(u32, @intCast(seen)), row.get(A).v);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5), seen);
+}
+
+test "createBatchComponents spawns multi-component entities" {
+    const A = struct { v: u32 = 0 };
+    const B = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    try world.entities.createBatchComponents(3, .{ A{ .v = 1 }, B{ .v = 2 } });
+
+    var qv = world.entities.queryView(.{ A, B });
+    var seen: usize = 0;
+    while (qv.next()) |row| {
+        try std.testing.expectEqual(@as(u32, 1), row.get(A).v);
+        try std.testing.expectEqual(@as(u32, 2), row.get(B).v);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), seen);
+}
+
+test "ColumnSimd f32AddMulSimd updates slice" {
+    var dst = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8 };
+    const src = [_]f32{ 1, 1, 1, 1, 1, 1, 1, 1 };
+    ColumnSimd.f32AddMulSimd(dst[0..], src[0..], 2);
+    try std.testing.expectEqual(@as(f32, 3), dst[0]);
+    try std.testing.expectEqual(@as(f32, 4), dst[1]);
+    try std.testing.expectEqual(@as(f32, 10), dst[7]);
+}
+
+test "SimdSystems integratePosition2D advances positions" {
+    const Position = struct { x: f32, y: f32 };
+    const Velocity = struct { dx: f32, dy: f32 };
+
+    var positions = [_]Position{
+        .{ .x = 0, .y = 0 },
+        .{ .x = 1, .y = 2 },
+    };
+    const velocities = [_]Velocity{
+        .{ .dx = 1, .dy = 0 },
+        .{ .dx = 0, .dy = 3 },
+    };
+    SimdSystems.integratePosition2D(Position, Velocity, positions[0..], velocities[0..], 2);
+    try std.testing.expectEqual(@as(f32, 2), positions[0].x);
+    try std.testing.expectEqual(@as(f32, 0), positions[0].y);
+    try std.testing.expectEqual(@as(f32, 1), positions[1].x);
+    try std.testing.expectEqual(@as(f32, 8), positions[1].y);
+}
+
+test "SimdSystems integratePosition2D supports x/y velocity fields" {
+    const Position = struct { x: f32, y: f32 };
+    const Velocity = struct { x: f32, y: f32 };
+
+    var positions = [_]Position{.{ .x = 1, .y = 2 }};
+    const velocities = [_]Velocity{.{ .x = 3, .y = 4 }};
+    SimdSystems.integratePosition2D(Position, Velocity, positions[0..], velocities[0..], 0.5);
+    try std.testing.expectEqual(@as(f32, 2.5), positions[0].x);
+    try std.testing.expectEqual(@as(f32, 4), positions[0].y);
+}
+
+test "queryViewSimd forEachColumn visits SoA columns" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    try world.entities.createBatchUniform(A, 4, .{ .v = 1 });
+
+    const Bump = struct {
+        fn cb(slice: []A, _: u32) void {
+            for (slice) |*elem| elem.v += 1;
+        }
+    };
+    var qv = world.entities.queryViewSimd(.{A});
+    qv.forEachColumn(A, Bump.cb);
+
+    var seen: usize = 0;
+    var row_it = world.entities.queryView(.{A});
+    while (row_it.next()) |row| {
+        try std.testing.expectEqual(@as(u32, 2), row.get(A).v);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), seen);
+}
+
+test "queryViewSimd integratePosition2D updates archetype columns" {
+    const Position = struct { x: f32, y: f32 };
+    const Velocity = struct { dx: f32, dy: f32 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    const e = try world.entities.create();
+    _ = try e.addComponent(Position{ .x = 0, .y = 0 });
+    _ = try e.addComponent(Velocity{ .dx = 1, .dy = 2 });
+
+    var qv = world.entities.queryViewSimd(.{ Position, Velocity });
+    qv.integratePosition2D(Position, Velocity, 0.5);
+    try std.testing.expectEqual(@as(f32, 0.5), e.get(Position).?.x);
+    try std.testing.expectEqual(@as(f32, 1), e.get(Position).?.y);
+}
+
+test "processComponentsSimd mutates archetype columns" {
+    const A = struct { v: u32 = 0 };
+
+    var world = try World.create();
+    defer world.destroy();
+
+    try world.entities.createBatchUniform(A, 3, .{ .v = 0 });
+
+    const Bump = struct {
+        fn bump(elem: *A) void {
+            elem.v += 10;
+        }
+    };
+    world.components.processComponentsSimd(A, Bump.bump);
+
+    var qv = world.entities.queryView(.{A});
+    var seen: usize = 0;
+    while (qv.next()) |row| {
+        try std.testing.expectEqual(@as(u32, 10), row.get(A).v);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), seen);
 }

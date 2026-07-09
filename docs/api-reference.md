@@ -511,66 +511,71 @@ while (it.next()) |component| {
 
 ## SIMD Optimizations
 
-Coyote ECS provides SIMD (Single Instruction, Multiple Data) optimizations for efficient processing of components.
+Coyote ECS stores sole-owner components in dense **SoA archetype columns**. SIMD helpers iterate those columns directly instead of walking sparse component slots.
 
-### Functions
+### Column iteration (`queryViewSimd`)
 
-#### `processComponentsSimd(ctx: *_Components, comptime comp_type: type, processor: fn (*comp_type) void) void`
-
-Processes components of the specified type using SIMD operations.
+Use `queryViewSimd` when a system can process whole columns (or SIMD batches within a column):
 
 ```zig
-world._components[0].processComponentsSimd(MyComponent, |component| {
-    // Process component
-});
+const Position = struct { x: f32, y: f32 };
+const Velocity = struct { dx: f32, dy: f32 };
+
+var qv = world.entities.queryViewSimd(.{ Position, Velocity });
+qv.integratePosition2D(Position, Velocity, delta_time);
 ```
 
-#### `processComponentsRangeSimd(ctx: *_Components, comptime comp_type: type, start_idx: usize, end_idx: usize, processor: fn (*comp_type) void) void`
+`QueryViewSimd` methods:
 
-Processes components of the specified type within a range using SIMD operations.
+- `forEachColumn(T, callback)` — `callback([]T, arch_idx: u32)`
+- `processColumn(T, processor)` — element-wise `processor(*T)`
+- `integratePosition2D(Position, Velocity, dt)` — SIMD position integration when both types are in the include list
+
+Exclude filters mirror `queryView`:
 
 ```zig
-world._components[0].processComponentsRangeSimd(MyComponent, 0, 100, |component| {
-    // Process component
-});
+var qv = world.entities.queryViewSimdExclude(.{ Position }, .{ Frozen });
 ```
 
-### Iterator Types with SIMD Support
+### Component column processing
 
-#### `SuperComponents.MaskedIterator`
-
-Iterates over components of a specific type using SIMD operations for mask checks.
+`processComponentsSimd` walks every archetype column for a type:
 
 ```zig
-var it = world.components.iteratorFilter(MyComponent);
-while (it.next()) |component| {
-    // Process component
-}
+const Bump = struct {
+    fn bump(elem: *MyComponent) void {
+        elem.value += 1;
+    }
+};
+world.components.processComponentsSimd(MyComponent, Bump.bump);
 ```
 
-#### `SuperComponents.MaskedRangeIterator`
-
-Iterates over components of a specific type within a range using SIMD operations for mask checks.
+Process a row subrange with `processComponentsRangeSimd`:
 
 ```zig
-var it = world.components.iteratorFilterRange(MyComponent, 0, 100);
-while (it.next()) |component| {
-    // Process component
-}
+world.components.processComponentsRangeSimd(MyComponent, 0, 1024, Bump.bump);
 ```
 
-#### `SuperComponents.MaskedEntityIterator`
+### Low-level helpers
 
-Iterates over components of a specific type attached to an entity using SIMD operations for mask checks.
+- `ColumnSimd.typedSlice(T, col, row_count)` — view an archetype column as `[]T`
+- `ColumnSimd.f32AddMulSimd(dst, src, scale)` — `dst[i] += src[i] * scale`
+- `ColumnSimd.fillUniformSimd(T, slice, value)` — SIMD fill for `f32` slices
+- `SimdSystems.integratePosition2D(Position, Velocity, positions, velocities, dt)`
+- `SimdSystems.integratePosition2DQuery(world, Position, Velocity, dt)`
 
-```zig
-var it = world.components.iteratorFilterByEntity(entity, MyComponent);
-while (it.next()) |component| {
-    // Process component
-}
-```
+### When to use which API
 
-For more details on SIMD optimizations, see the [Advanced Optimizations](advanced-optimizations.md) guide.
+| Goal | API |
+|------|-----|
+| Per-entity logic with multiple components | `queryView` |
+| Bulk numeric updates on one column | `queryViewSimd` / `processColumn` |
+| Physics-style f32 integration | `integratePosition2D` |
+| Type-wide pass without a query filter | `processComponentsSimd` |
+
+Archetype-backed `iteratorFilter` remains available for entity/component handles and structural changes (attach, detach, destroy).
+
+For more details, see the [Advanced Optimizations](advanced-optimizations.md) guide.
 
 ## C API
 

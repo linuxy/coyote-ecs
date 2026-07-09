@@ -4,292 +4,142 @@ This guide covers advanced optimization techniques for Coyote ECS, including SIM
 
 ## SIMD Optimizations
 
-SIMD (Single Instruction, Multiple Data) allows you to process multiple data points in parallel, which can significantly improve performance for certain operations.
+SIMD (Single Instruction, Multiple Data) lets you process multiple `f32` values per instruction. Coyote ECS stores sole-owner components in **SoA archetype columns**, so hot systems can walk dense typed slices instead of sparse component slots.
 
-### Vectorizing Component Data
+### Column-oriented queries
 
-Components with multiple similar fields (like Position with x and y) can be vectorized using Zig's SIMD types:
+Prefer `queryViewSimd` for bulk numeric work. It yields entire archetype columns for each matching signature:
 
 ```zig
-const std = @import("std");
-const Vec2 = @Vector(2, f32);
+const Position = struct { x: f32, y: f32 };
+const Velocity = struct { dx: f32, dy: f32 };
 
-pub const Components = struct {
-    pub const Position = struct {
-        data: Vec2 = Vec2{ 0, 0 },
-        
-        pub fn init(x: f32, y: f32) Position {
-            return Position{ .data = Vec2{ x, y } };
-        }
-        
-        pub fn add(self: *Position, other: Position) void {
-            self.data += other.data;
-        }
-        
-        pub fn scale(self: *Position, factor: f32) void {
-            self.data *= @splat(2, factor);
-        }
-    };
+pub fn IntegrateMotion(world: *World, dt: f32) void {
+    var qv = world.entities.queryViewSimd(.{ Position, Velocity });
+    qv.integratePosition2D(Position, Velocity, dt);
+}
+```
+
+For custom per-element updates on one component type:
+
+```zig
+const SetRipe = struct {
+    fn set(fruit: *Components.Apple) void {
+        fruit.ripe = true;
+    }
 };
+
+var qv = world.entities.queryViewSimd(.{Components.Apple});
+qv.processColumn(Components.Apple, SetRipe.set);
 ```
 
-### SIMD Operations on Components
-
-When iterating over components, you can use SIMD operations to process multiple components at once:
+`forEachColumn` exposes the raw `[]T` slice when you want manual SIMD:
 
 ```zig
-pub fn UpdatePositions(world: *World, delta: f32) void {
-    var it = world.components.iteratorFilter(Components.Position);
-    const delta_vec = @splat(2, delta);
-    
-    while(it.next()) |component| {
-        var pos = component.get(Components.Position);
-        pos.data += delta_vec;
+const Update = struct {
+    fn update(slice: []f32, _: u32) void {
+        ColumnSimd.fillUniformSimd(f32, slice, 0);
     }
-}
+};
+var qv = world.entities.queryViewSimd(.{MyFloatComponent});
+qv.forEachColumn(MyFloatComponent, Update.update);
 ```
 
-### Batch Processing with SIMD
+### Type-wide column passes
 
-For systems that process multiple components of the same type, you can use SIMD to process them in batches:
+When you do not need a multi-component query filter, use `processComponentsSimd`:
 
 ```zig
-pub fn UpdateVelocities(world: *World, gravity: f32) void {
-    var it = world.components.iteratorFilter(Components.Velocity);
-    const gravity_vec = Vec2{ 0, gravity };
-    
-    while(it.next()) |component| {
-        var vel = component.get(Components.Velocity);
-        vel.data += gravity_vec;
-    }
-}
+world.components.processComponentsSimd(Components.Velocity, ApplyDrag.apply);
 ```
 
-## Parallel Processing with Chunked Iteration
-
-Coyote ECS provides a `iteratorFilterRange` function that allows you to process components in chunks, which is perfect for parallel processing:
-
-### Using iteratorFilterRange
-
-The `iteratorFilterRange` function allows you to specify a range of components to iterate over:
+Parallel chunking can target row ranges inside each archetype column:
 
 ```zig
-pub fn UpdatePositionsParallel(world: *World, delta_time: f32) void {
-    const thread_count = std.Thread.getCpuCount();
-    const component_count = world.components.count(Components.Position);
-    const chunk_size = (component_count + thread_count - 1) / thread_count;
-    
-    var threads: []std.Thread = undefined;
-    threads = std.heap.page_allocator.alloc(std.Thread, thread_count) catch return;
-    defer std.heap.page_allocator.free(threads);
-    
-    var i: usize = 0;
-    while (i < thread_count) : (i += 1) {
-        const start = i * chunk_size;
-        const end = @min(start + chunk_size, component_count);
-        
-        threads[i] = std.Thread.spawn(.{}, struct {
-            fn updateChunk(w: *World, start_idx: usize, end_idx: usize, dt: f32) void {
-                var it = w.components.iteratorFilterRange(Components.Position, start_idx, end_idx);
-                const dt_vec = @splat(2, dt);
-                
-                while (it.next()) |component| {
-                    var pos = component.get(Components.Position);
-                    pos.data += dt_vec;
-                }
-            }
-        }.updateChunk, .{ world, start, end, delta_time }) catch continue;
-    }
-    
-    // Wait for all threads to complete
-    for (threads) |thread| {
-        thread.join();
-    }
-}
+world.components.processComponentsRangeSimd(Components.Velocity, start, end, ApplyDrag.apply);
 ```
 
-### Combining SIMD with Parallel Processing
-
-For maximum performance, you can combine SIMD operations with parallel processing:
+### Low-level helpers
 
 ```zig
-pub fn UpdatePhysicsParallel(world: *World, delta_time: f32) void {
-    const thread_count = std.Thread.getCpuCount();
-    const component_count = world.components.count(Components.Position);
-    const chunk_size = (component_count + thread_count - 1) / thread_count;
-    
-    var threads: []std.Thread = undefined;
-    threads = std.heap.page_allocator.alloc(std.Thread, thread_count) catch return;
-    defer std.heap.page_allocator.free(threads);
-    
-    var i: usize = 0;
-    while (i < thread_count) : (i += 1) {
-        const start = i * chunk_size;
-        const end = @min(start + chunk_size, component_count);
-        
-        threads[i] = std.Thread.spawn(.{}, struct {
-            fn updatePhysicsChunk(w: *World, start_idx: usize, end_idx: usize, dt: f32) void {
-                // Process positions with SIMD
-                var pos_it = w.components.iteratorFilterRange(Components.Position, start_idx, end_idx);
-                const dt_vec = @splat(2, dt);
-                
-                while (pos_it.next()) |component| {
-                    var pos = component.get(Components.Position);
-                    pos.data += dt_vec;
-                }
-                
-                // Process velocities with SIMD
-                var vel_it = w.components.iteratorFilterRange(Components.Velocity, start_idx, end_idx);
-                const gravity_vec = Vec2{ 0, 9.8 * dt };
-                
-                while (vel_it.next()) |component| {
-                    var vel = component.get(Components.Velocity);
-                    vel.data += gravity_vec;
-                }
-            }
-        }.updatePhysicsChunk, .{ world, start, end, delta_time }) catch continue;
-    }
-    
-    // Wait for all threads to complete
-    for (threads) |thread| {
-        thread.join();
-    }
+// dst[i] += src[i] * scale
+ColumnSimd.f32AddMulSimd(dst, src, scale);
+
+// SIMD fill for f32 columns
+ColumnSimd.fillUniformSimd(f32, slice, value);
+
+// Integrate matched position/velocity columns across all archetypes
+SimdSystems.integratePosition2DQuery(world, Position, Velocity, dt);
+```
+
+### Per-entity vs column APIs
+
+| Use case | API |
+|----------|-----|
+| Need entity handle + several components | `queryView` |
+| Bulk update one component column | `queryViewSimd.processColumn` |
+| 2D motion integration | `integratePosition2D` |
+| Structural changes (attach/detach/destroy) | `iteratorFilter` / commands |
+
+### Parallel processing with column ranges
+
+`processComponentsRangeSimd` and `queryViewSimd` operate on archetype row indices. For threading, partition row ranges per archetype (or per type via `processComponentsRangeSimd`) instead of using sparse global component indices:
+
+```zig
+pub fn UpdateVelocitiesParallel(world: *World, start: usize, end: usize) void {
+    world.components.processComponentsRangeSimd(Components.Velocity, start, end, ApplyGravity.apply);
 }
 ```
 
 ## Vectorized Entity and Component Storage
 
-### SoA (Structure of Arrays) vs AoS (Array of Structures)
+### SoA archetype columns
 
-Coyote ECS currently uses an Array of Structures (AoS) approach for component storage. For SIMD operations, a Structure of Arrays (SoA) approach can be more efficient:
+Coyote ECS groups entities by component signature and stores sole-owner component data in dense columns inside each archetype table:
 
 ```zig
-// Current AoS approach
 pub const Position = struct {
     x: f32 = 0,
     y: f32 = 0,
 };
 
-// SoA approach for SIMD
-pub const PositionStorage = struct {
-    xs: []f32,
-    ys: []f32,
-    
-    pub fn init(allocator: std.mem.Allocator, capacity: usize) !PositionStorage {
-        return PositionStorage{
-            .xs = try allocator.alloc(f32, capacity),
-            .ys = try allocator.alloc(f32, capacity),
-        };
-    }
-    
-    pub fn deinit(self: *PositionStorage, allocator: std.mem.Allocator) void {
-        allocator.free(self.xs);
-        allocator.free(self.ys);
-    }
-    
-    pub fn updateAll(self: *PositionStorage, count: usize, delta_x: f32, delta_y: f32) void {
-        const delta_x_vec = @splat(4, delta_x);
-        const delta_y_vec = @splat(4, delta_y);
-        
-        var i: usize = 0;
-        while (i + 4 <= count) : (i += 4) {
-            const x_vec = std.mem.bytesAsSlice(f32, self.xs[i..i+4]);
-            const y_vec = std.mem.bytesAsSlice(f32, self.ys[i..i+4]);
-            
-            x_vec.* += delta_x_vec;
-            y_vec.* += delta_y_vec;
-        }
-        
-        // Handle remaining elements
-        while (i < count) : (i += 1) {
-            self.xs[i] += delta_x;
-            self.ys[i] += delta_y;
-        }
-    }
-};
+// Column access via queryView / queryViewSimd
+var qv = world.entities.queryView(.{ Position });
+while (qv.next()) |row| {
+    row.get(Position).x += 1;
+}
 ```
 
-### Implementing SoA in Coyote ECS
+`queryViewSimd` skips per-entity iteration and hands systems the full `[]Position` slice for each matching archetype.
 
-To implement SoA in Coyote ECS, you would need to modify the component storage system:
-
-```zig
-// Example of how SoA could be integrated into Coyote ECS
-pub const ComponentStorage = struct {
-    // For each component type, store arrays of each field
-    position_xs: []f32,
-    position_ys: []f32,
-    velocity_xs: []f32,
-    velocity_ys: []f32,
-    // ... other component fields
-    
-    pub fn updatePositions(self: *ComponentStorage, count: usize, delta_time: f32) void {
-        const dt_vec = @splat(4, delta_time);
-        
-        var i: usize = 0;
-        while (i + 4 <= count) : (i += 4) {
-            const vel_x_vec = std.mem.bytesAsSlice(f32, self.velocity_xs[i..i+4]);
-            const vel_y_vec = std.mem.bytesAsSlice(f32, self.velocity_ys[i..i+4]);
-            const pos_x_vec = std.mem.bytesAsSlice(f32, self.position_xs[i..i+4]);
-            const pos_y_vec = std.mem.bytesAsSlice(f32, self.position_ys[i..i+4]);
-            
-            pos_x_vec.* += vel_x_vec.* * dt_vec;
-            pos_y_vec.* += vel_y_vec.* * dt_vec;
-        }
-        
-        // Handle remaining elements
-        while (i < count) : (i += 1) {
-            self.position_xs[i] += self.velocity_xs[i] * delta_time;
-            self.position_ys[i] += self.velocity_ys[i] * delta_time;
-        }
-    }
-};
-```
+Batch spawning (`createBatchUniform`, `createBatchValues`, `createBatchComponents`) fills those columns without per-entity attach overhead.
 
 ## Memory Alignment for SIMD
 
-For optimal SIMD performance, ensure your component data is properly aligned:
+Archetype columns respect each component type's natural alignment (`@alignOf(T)`). For `f32` fields inside structs, the column stores whole `T` values; `SimdSystems.integratePosition2D` gathers/scatters `x`/`y` lanes with the host's suggested vector width.
+
+## Benchmarking column vs scalar iteration
+
+Compare `queryView` (per-entity) against `queryViewSimd.integratePosition2D` (column SIMD):
 
 ```zig
-// Ensure 16-byte alignment for SIMD operations
-pub const AlignedPosition = struct {
-    data: Vec2 align(16) = Vec2{ 0, 0 },
-};
-```
-
-## Benchmarking SIMD vs Non-SIMD
-
-To measure the performance improvement from SIMD:
-
-```zig
-pub fn benchmarkSimd() void {
-    var world = World.create() catch return;
-    defer world.destroy();
-    
-    // Create test entities
-    var i: usize = 0;
-    while (i < 1000000) : (i += 1) {
-        var entity = world.entities.create() catch continue;
-        var position = world.components.create(Components.Position) catch continue;
-        entity.attach(position, Components.Position{ .x = 0, .y = 0 }) catch continue;
+pub fn IntegrateScalar(world: *World, dt: f32) void {
+    var qv = world.entities.queryView(.{ Position, Velocity });
+    while (qv.next()) |row| {
+        const vel = row.get(Velocity);
+        const pos = row.get(Position);
+        pos.x += vel.dx * dt;
+        pos.y += vel.dy * dt;
     }
-    
-    // Benchmark non-SIMD
-    const start1 = std.time.nanoTimestamp();
-    UpdatePositionsNonSimd(&world, 0.016);
-    const end1 = std.time.nanoTimestamp();
-    const non_simd_time = @as(f64, @floatFromInt(end1 - start1)) / 1_000_000.0;
-    
-    // Benchmark SIMD
-    const start2 = std.time.nanoTimestamp();
-    UpdatePositionsSimd(&world, 0.016);
-    const end2 = std.time.nanoTimestamp();
-    const simd_time = @as(f64, @floatFromInt(end2 - start2)) / 1_000_000.0;
-    
-    std.debug.print("Non-SIMD: {d:.2}ms, SIMD: {d:.2}ms, Speedup: {d:.2}x\n", 
-        .{non_simd_time, simd_time, non_simd_time / simd_time});
+}
+
+pub fn IntegrateSimd(world: *World, dt: f32) void {
+    var qv = world.entities.queryViewSimd(.{ Position, Velocity });
+    qv.integratePosition2D(Position, Velocity, dt);
 }
 ```
+
+Spawn test data with `createBatchUniform` or `createBatchComponents` so benchmarks measure column iteration, not entity creation.
 
 ## Next Steps
 
